@@ -12,6 +12,7 @@ const LIST_TTL = 15_000;
 const LIBRARY_TTL = 60_000;
 const BOARDS_TTL = 10 * 60_000;
 const CONFIG_TTL = 5 * 60_000;
+const HTTP_TIMEOUT = 15_000;
 
 function setting(key) {
   return String(host.setting(key) || "");
@@ -29,7 +30,7 @@ function fail(code, message) {
 
 let authState = null;
 let songState = null;
-let configCache = { at: 0, data: null };
+let configCache = { at: 0, data: null, pending: null };
 let listCache = { at: 0, data: null, pending: null };
 let libraryCache = {
   albums: { at: 0, data: null, pending: null },
@@ -37,6 +38,8 @@ let libraryCache = {
 };
 let boardsCache = { source: "", at: 0, data: null, pending: null };
 let discoverCache = { source: "", at: 0, data: null, pending: null };
+let playerLoginPending = null;
+let userLoginPending = null;
 
 function auth() {
   if (!authState) {
@@ -45,6 +48,7 @@ function auth() {
   }
   if (!authState.playerCookie) authState.playerCookie = "";
   if (!authState.userCookie) authState.userCookie = "";
+  if (typeof authState.userName !== "string") authState.userName = "";
   if (authState.signedOut !== true) authState.signedOut = false;
   return authState;
 }
@@ -66,7 +70,25 @@ function saveSongs() {
 }
 
 function resetAuth() {
-  authState = { playerCookie: "", userCookie: "", signedOut: false };
+  authState = { playerCookie: "", userCookie: "", userName: "", signedOut: false };
+  playerLoginPending = null;
+  userLoginPending = null;
+  saveAuth();
+}
+
+function resetUserAuth() {
+  const state = auth();
+  authState = { ...state, userCookie: "", userName: "", signedOut: false };
+  playerLoginPending = null;
+  userLoginPending = null;
+  saveAuth();
+}
+
+function resetPlayerAuth() {
+  const state = auth();
+  authState = { ...state, playerCookie: "" };
+  playerLoginPending = null;
+  userLoginPending = null;
   saveAuth();
 }
 
@@ -80,7 +102,7 @@ function emptySlot() {
 }
 
 function clearCaches() {
-  configCache = { at: 0, data: null };
+  configCache = { at: 0, data: null, pending: null };
   listCache = emptySlot();
   libraryCache = { albums: emptySlot(), artists: emptySlot() };
   boardsCache = { source: "", at: 0, data: null, pending: null };
@@ -95,7 +117,6 @@ function serverBase() {
   let raw = setting("server").trim();
   if (!raw) throw fail("setup", tr("Set the server address in the plugin's settings."));
   if (!/^https?:\/\//i.test(raw)) raw = `http://${raw}`;
-  raw = raw.replace(/\/+$/, "").replace(/\/music$/i, "");
   let parsed;
   try {
     parsed = new URL(raw);
@@ -105,11 +126,41 @@ function serverBase() {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw fail("setup", tr("The server address isn't a valid http or https address."));
   }
-  return raw;
+  if (parsed.username || parsed.password) {
+    throw fail("setup", tr("The server address must not include a username or password."));
+  }
+  let path = parsed.pathname.replace(/\/+$/, "");
+  if (/\/music$/i.test(path)) path = path.slice(0, -6);
+  return parsed.origin + path;
 }
 
 function accountInfo(name) {
-  return { id: name, name, imageUrl: `${serverBase()}/music/assets/yun-yin-favicon.png` };
+  return { id: name, name, imageUrl: pluginIcon() };
+}
+
+function fileUrl(path) {
+  let text = String(path ?? "").replace(/\\/g, "/");
+  if (!text) return "";
+  if (!text.startsWith("/")) text = `/${text}`;
+  return `file://${encodeURI(text).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
+}
+
+function pluginIcon() {
+  const dir = String(host.dir ?? "").trim().replace(/[\\/]+$/, "");
+  return dir ? fileUrl(`${dir}/icon.png`) : absoluteUrl("/music/assets/yun-yin-favicon.png");
+}
+
+function absoluteUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  if (/^https?:\/\//i.test(text)) return text;
+  if (text.startsWith("/") && !text.startsWith("//")) return serverBase() + text;
+  try {
+    const url = new URL(text, `${serverBase()}/`);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : text;
+  } catch {
+    return text;
+  }
 }
 
 function sourceId() {
@@ -134,7 +185,11 @@ function hasAccount() {
 
 function stripSourcePrefix(value, source) {
   let text = String(value ?? "");
-  if (source && text.startsWith(`${source}_`)) text = text.slice(source.length + 1);
+  if (source) {
+    const double = `${source}__`;
+    if (text.startsWith(double)) text = text.slice(double.length);
+    else if (text.startsWith(`${source}_`)) text = text.slice(source.length + 1);
+  }
   return text;
 }
 
@@ -163,8 +218,9 @@ function trackIdFor(song) {
 function parseTrackId(id) {
   const text = String(id ?? "");
   const at = text.startsWith("t:") ? text.indexOf(":", 2) : -1;
-  if (at < 3) throw fail("unavailable", tr("The server didn't return a playable address."));
-  return { source: text.slice(2, at), songmid: text.slice(at + 1) };
+  const songmid = at >= 3 ? text.slice(at + 1) : "";
+  if (!songmid) throw fail("unavailable", tr("The server didn't return a playable address."));
+  return { source: text.slice(2, at), songmid };
 }
 
 function albumIdFor(source, id) {
@@ -203,7 +259,13 @@ function parseEntityId(id, prefix) {
   if (at < 1) return null;
   const source = rest.slice(0, at);
   const tail = rest.slice(at + 1);
-  if (tail.startsWith("n:")) return { source, raw: "", name: decodeURIComponent(tail.slice(2)) };
+  if (tail.startsWith("n:")) {
+    try {
+      return { source, raw: "", name: decodeURIComponent(tail.slice(2)) };
+    } catch {
+      return null;
+    }
+  }
   return { source, raw: tail, name: "" };
 }
 
@@ -264,7 +326,7 @@ function splitArtistNames(value) {
       .filter(Boolean);
   }
   return String(value ?? "")
-    .split(/[、,，;；&|]+/)
+    .split(/[、,，;；|]+/)
     .map(item => item.trim())
     .filter(Boolean);
 }
@@ -309,7 +371,9 @@ function parseInterval(value) {
 function dateOnly(value) {
   if (value === null || value === undefined || value === "") return "";
   if (typeof value === "number" || /^\d+$/.test(String(value))) {
-    const date = new Date(Number(value));
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "";
+    const date = new Date(number < 1e12 ? number * 1000 : number);
     return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
   }
   return String(value).slice(0, 10);
@@ -324,7 +388,9 @@ function webUrl(source, songmid) {
 
 function firstSongImage(list) {
   const first = Array.isArray(list) ? list[0] : null;
-  return first?.img ?? first?.picUrl ?? first?.meta?.picUrl ?? first?.album?.picUrl ?? first?.album?.img ?? "";
+  return absoluteUrl(
+    first?.img ?? first?.picUrl ?? first?.meta?.picUrl ?? first?.album?.picUrl ?? first?.album?.img ?? "",
+  );
 }
 
 function toTrack(song) {
@@ -335,7 +401,7 @@ function toTrack(song) {
   const artists = toArtists(artistValue, source);
   const albumName = String(song?.albumName ?? meta.albumName ?? song?.album?.name ?? "").trim();
   const albumRaw = song?.albumId ?? meta.albumId ?? song?.album?.id ?? "";
-  const image = String(song?.img ?? song?.picUrl ?? meta.picUrl ?? song?.album?.picUrl ?? "").trim();
+  const image = absoluteUrl(song?.img ?? song?.picUrl ?? meta.picUrl ?? song?.album?.picUrl);
   const album = {
     id: albumRaw ? albumIdFor(source, stripSourcePrefix(albumRaw, source)) : albumName ? albumNameId(source, albumName) : "",
     name: albumName,
@@ -355,12 +421,13 @@ function toTrack(song) {
 function toAlbum(item, source) {
   const raw = item?.id ?? item?.albumId ?? item?.albumMid ?? item?.mid ?? "";
   const name = String(item?.name ?? item?.albumName ?? "").trim();
-  const image = String(item?.picUrl ?? item?.img ?? item?.cover ?? item?.album?.picUrl ?? "").trim();
+  const image = absoluteUrl(item?.picUrl ?? item?.img ?? item?.cover ?? item?.album?.picUrl);
   const artistName = String(item?.artistName ?? item?.singer ?? "").trim();
   const artistRaw = item?.artistId ?? item?.artistMid ?? item?.singerId ?? item?.singerMid ?? "";
-  const artists = artistName
-    ? [{ id: artistRaw ? artistIdFor(source, stripSourcePrefix(artistRaw, source)) : artistNameId(source, artistName), name: artistName }]
-    : [];
+  const artists = toArtists(artistName, source);
+  if (artists.length && artistRaw) {
+    artists[0] = { ...artists[0], id: artistIdFor(source, stripSourcePrefix(artistRaw, source)) };
+  }
   return {
     id: raw !== "" ? albumIdFor(source, stripSourcePrefix(raw, source)) : name ? albumNameId(source, name) : "",
     name,
@@ -373,7 +440,7 @@ function toAlbum(item, source) {
 function toArtist(item, source) {
   const raw = item?.id ?? item?.artistId ?? item?.artistMid ?? item?.mid ?? "";
   const name = String(item?.name ?? item?.singer ?? "").trim();
-  const image = String(item?.picUrl ?? item?.avatar ?? item?.img ?? "").trim();
+  const image = absoluteUrl(item?.picUrl ?? item?.avatar ?? item?.img);
   return {
     id: raw !== "" ? artistIdFor(source, stripSourcePrefix(raw, source)) : name ? artistNameId(source, name) : "",
     name,
@@ -382,12 +449,12 @@ function toArtist(item, source) {
 }
 
 function toPlaylist(item, source) {
-  const raw = item?.id ?? item?.listId ?? item?.dissid ?? "";
+  const raw = stripSourcePrefix(item?.id ?? item?.listId ?? item?.dissid ?? "", source);
   const count = Number(item?.trackCount ?? item?.total ?? item?.songCount ?? 0);
   return {
     id: raw !== "" ? playlistIdFor(source, raw) : "",
     name: String(item?.name ?? "").trim(),
-    imageUrl: String(item?.picUrl ?? item?.img ?? item?.cover ?? "").trim(),
+    imageUrl: absoluteUrl(item?.picUrl ?? item?.img ?? item?.cover),
     description: String(item?.desc ?? item?.description ?? "").trim(),
     owner: String(item?.creator ?? item?.author ?? item?.nickname ?? "").trim(),
     trackCount: Number.isFinite(count) && count > 0 ? count : undefined,
@@ -395,12 +462,12 @@ function toPlaylist(item, source) {
 }
 
 function toBoard(board, source) {
-  const raw = board?.bangid ?? board?.id ?? "";
-  const image = String(board?.img ?? board?.picUrl ?? board?.cover ?? "").trim();
+  const raw = stripSourcePrefix(board?.bangid ?? board?.id ?? "", source);
+  const image = absoluteUrl(board?.img ?? board?.picUrl ?? board?.cover);
   return {
     id: boardIdFor(source, raw),
     name: String(board?.name ?? "").trim(),
-    imageUrl: image || `${serverBase()}/music/assets/yun-yin-favicon.png`,
+    imageUrl: image || pluginIcon(),
     description: tr("Chart"),
   };
 }
@@ -411,7 +478,7 @@ function toUserPlaylist(item) {
   return {
     id: userListId(String(item?.id ?? "")),
     name: String(item?.name ?? "").trim(),
-    imageUrl: String(item?.img ?? firstSongImage(list)).trim(),
+    imageUrl: absoluteUrl(item?.img) || firstSongImage(list),
     trackCount: Number.isFinite(count) && count > 0 ? count : undefined,
     mine: !item?.source,
     saved: Boolean(item?.source),
@@ -424,7 +491,7 @@ function toComment(item) {
   return {
     id: String(item?.id ?? ""),
     author: String(item?.userName ?? item?.author ?? "").trim(),
-    avatarUrl: String(item?.avatar ?? item?.avatarUrl ?? "").trim(),
+    avatarUrl: absoluteUrl(item?.avatar ?? item?.avatarUrl),
     text: String(item?.text ?? ""),
     time,
     likes: Number(item?.likedCount ?? item?.likes ?? 0) || 0,
@@ -453,20 +520,24 @@ async function raw(path, options = {}) {
   const cookie = cookieHeader();
   if (cookie) headers.Cookie = cookie;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Number(options.timeout) || HTTP_TIMEOUT);
   let response;
+  let text = "";
   try {
     response = await fetch(url, {
       method: options.method || "GET",
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
     });
-  } catch {
-    throw new Error(tr("Couldn't reach the server. Check the address and network."));
-  }
-  let text = "";
-  try {
     text = await response.text();
-  } catch {}
+  } catch {
+    if (controller.signal.aborted) throw new Error(tr("The server took too long to respond."));
+    throw new Error(tr("Couldn't reach the server. Check the address and network."));
+  } finally {
+    clearTimeout(timer);
+  }
   let data = null;
   if (text) {
     try {
@@ -497,9 +568,18 @@ function setCookie(headers, name) {
 }
 
 function decode(result) {
-  if (result.ok) return result.data !== null ? result.data : result.text;
+  if (result.ok) {
+    if (result.data && typeof result.data === "object" && result.data.success === false) {
+      const message =
+        String(result.data.message ?? result.data.error ?? "").trim() || tr("This server doesn't allow that change.");
+      throw fail("unavailable", message);
+    }
+    return result.data !== null ? result.data : result.text;
+  }
   const message =
-    String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() || `HTTP ${result.status}`;
+    String(result.data?.message ?? result.data?.error ?? result.text ?? "")
+      .trim()
+      .slice(0, 500) || `HTTP ${result.status}`;
   if (result.status === 401) throw fail("signIn", message);
   if (result.status === 403 || result.status === 404 || result.status === 422 || result.status === 429) {
     throw fail("unavailable", message);
@@ -508,27 +588,54 @@ function decode(result) {
 }
 
 async function serverConfig() {
-  if (configCache.data && Date.now() - configCache.at < CONFIG_TTL) return configCache.data;
-  const result = await raw("/api/music/config");
-  if (!result.ok) throw decode(result);
-  const data = result.data && typeof result.data === "object" ? result.data : {};
-  configCache = { at: Date.now(), data: { playerAuth: Boolean(data["player.enableAuth"]) } };
-  return configCache.data;
+  const slot = configCache;
+  if (slot.data && Date.now() - slot.at < CONFIG_TTL) return slot.data;
+  if (slot.pending) return slot.pending;
+  const pending = raw("/api/music/config").then(
+    result => {
+      if (!result.ok) throw decode(result);
+      const data = result.data && typeof result.data === "object" ? result.data : {};
+      const config = { playerAuth: Boolean(data["player.enableAuth"]) };
+      if (configCache === slot) configCache = { at: Date.now(), data: config, pending: null };
+      return config;
+    },
+    error => {
+      if (configCache === slot) slot.pending = null;
+      throw error;
+    },
+  );
+  slot.pending = pending;
+  return pending;
 }
 
-async function loginPlayer() {
+async function loginPlayerNow() {
+  const state = auth();
   const value = playerPassword();
   if (!value) throw fail("setup", tr("This server asks for a player password. Set it in the plugin's settings."));
   const result = await raw("/api/music/auth", { method: "POST", body: { password: value } });
+  if (state !== authState) throw new Error(tr("The server settings changed. Try again."));
   if (!result.ok) {
     const message =
       String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() || tr("Couldn't log in to the server.");
-    throw fail(result.status === 401 ? "signIn" : "setup", message);
+    if (result.status === 401) throw fail("setup", message);
+    if (result.status === 403 || result.status === 429) throw fail("unavailable", message);
+    throw new Error(message);
   }
   const cookie = setCookie(result.headers, "lx_player_session");
   if (!cookie) throw new Error(tr("The server didn't set a session cookie."));
-  auth().playerCookie = cookie;
+  state.playerCookie = cookie;
   saveAuth();
+}
+
+async function loginPlayer() {
+  if (playerLoginPending) return playerLoginPending;
+  const pending = loginPlayerNow();
+  playerLoginPending = pending;
+  try {
+    return await pending;
+  } finally {
+    if (playerLoginPending === pending) playerLoginPending = null;
+  }
 }
 
 async function ensurePlayer() {
@@ -541,35 +648,48 @@ async function ensurePlayer() {
   await loginPlayer();
 }
 
-async function loginUser() {
+async function loginUserNow() {
+  const state = auth();
   if (!hasAccount()) throw fail("setup", tr("Set your YunLu Music account in the plugin's settings."));
   const result = await raw("/api/user/login", {
     method: "POST",
     body: { username: username(), password: password() },
   });
+  if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
   if (!result.ok) {
     clearUserCookie();
     const message =
       String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() || tr("Couldn't log in to the server.");
-    throw fail("signIn", message);
+    if (result.status === 401) throw fail("signIn", message);
+    if (result.status === 403 || result.status === 429) throw fail("unavailable", message);
+    throw new Error(message);
   }
   const cookie = setCookie(result.headers, "lx_user_session");
   if (!cookie) throw new Error(tr("The server didn't set a session cookie."));
-  auth().userCookie = cookie;
-  auth().signedOut = false;
+  const name = String(result.data?.username || username());
+  state.userCookie = cookie;
+  state.userName = name;
+  state.signedOut = false;
   saveAuth();
-  return String(result.data?.username || username());
+  return name;
+}
+
+async function loginUser() {
+  if (userLoginPending) return userLoginPending;
+  const pending = loginUserNow();
+  userLoginPending = pending;
+  try {
+    return await pending;
+  } finally {
+    if (userLoginPending === pending) userLoginPending = null;
+  }
 }
 
 async function ensureUser() {
   if (!hasAccount()) return null;
   const state = auth();
   if (state.signedOut) return null;
-  if (state.userCookie) {
-    const result = await raw("/api/user/auth/verify");
-    if (result.ok && result.data && result.data.valid) return String(result.data.username || username());
-    clearUserCookie();
-  }
+  if (state.userCookie) return state.userName || username();
   return loginUser();
 }
 
@@ -580,6 +700,7 @@ function clearPlayerCookie() {
 
 function clearUserCookie() {
   auth().userCookie = "";
+  auth().userName = "";
   saveAuth();
 }
 
@@ -599,7 +720,8 @@ async function api(path, options = {}) {
   if (result.status === 401 && !retried) {
     if (path.startsWith("/api/music")) {
       clearPlayerCookie();
-      await loginPlayer();
+      configCache = { at: 0, data: null, pending: null };
+      await ensurePlayer();
     }
     if (needsUser) {
       clearUserCookie();
@@ -611,19 +733,24 @@ async function api(path, options = {}) {
 }
 
 async function userList(force = false) {
-  if (!force && listCache.data && Date.now() - listCache.at < LIST_TTL) return listCache.data;
-  if (listCache.pending) return listCache.pending;
+  const slot = listCache;
+  if (!force && slot.data && Date.now() - slot.at < LIST_TTL) return slot.data;
+  if (slot.pending) return slot.pending;
   const pending = api("/api/user/list", { user: true }).then(
     data => {
-      listCache = { at: Date.now(), data, pending: null };
+      if (listCache === slot) {
+        slot.data = data;
+        slot.at = Date.now();
+        slot.pending = null;
+      }
       return data;
     },
     error => {
-      listCache.pending = null;
+      if (listCache === slot) slot.pending = null;
       throw error;
     },
   );
-  listCache = { ...listCache, pending };
+  slot.pending = pending;
   return pending;
 }
 
@@ -634,13 +761,15 @@ async function library(kind, force = false) {
   const pending = api(`/api/user/library/${kind}`, { user: true }).then(
     data => {
       const list = Array.isArray(data) ? data : [];
-      slot.data = list;
-      slot.at = Date.now();
-      slot.pending = null;
+      if (libraryCache[kind] === slot) {
+        slot.data = list;
+        slot.at = Date.now();
+        slot.pending = null;
+      }
       return list;
     },
     error => {
-      slot.pending = null;
+      if (libraryCache[kind] === slot) slot.pending = null;
       throw error;
     },
   );
@@ -656,44 +785,54 @@ function setLibrary(kind, list) {
 }
 
 async function boardsFor(source) {
-  if (boardsCache.data && boardsCache.source === source && Date.now() - boardsCache.at < BOARDS_TTL) {
-    return boardsCache.data;
-  }
-  if (boardsCache.pending) return boardsCache.pending;
+  const slot = boardsCache;
+  if (slot.data && slot.source === source && Date.now() - slot.at < BOARDS_TTL) return slot.data;
+  if (slot.pending && slot.source === source) return slot.pending;
+  const next = { source, at: 0, data: null, pending: null };
+  boardsCache = next;
   const pending = api("/api/music/leaderboard/boards", { query: { source } }).then(
     data => {
       const list = Array.isArray(data?.list) ? data.list : [];
       const mapped = list.map(item => toBoard(item, source));
-      boardsCache = { source, at: Date.now(), data: mapped, pending: null };
+      if (boardsCache === next) {
+        next.data = mapped;
+        next.at = Date.now();
+        next.pending = null;
+      }
       return mapped;
     },
     error => {
-      boardsCache.pending = null;
+      if (boardsCache === next) next.pending = null;
       throw error;
     },
   );
-  boardsCache = { ...boardsCache, pending };
+  next.pending = pending;
   return pending;
 }
 
 async function discoverFor(source) {
-  if (discoverCache.data && discoverCache.source === source && Date.now() - discoverCache.at < BOARDS_TTL) {
-    return discoverCache.data;
-  }
-  if (discoverCache.pending) return discoverCache.pending;
+  const slot = discoverCache;
+  if (slot.data && slot.source === source && Date.now() - slot.at < BOARDS_TTL) return slot.data;
+  if (slot.pending && slot.source === source) return slot.pending;
+  const next = { source, at: 0, data: null, pending: null };
+  discoverCache = next;
   const pending = api("/api/music/songList/list", { query: { source, page: 1 } }).then(
     data => {
       const list = Array.isArray(data?.list) ? data.list : [];
       const mapped = list.map(item => toPlaylist(item, source));
-      discoverCache = { source, at: Date.now(), data: mapped, pending: null };
+      if (discoverCache === next) {
+        next.data = mapped;
+        next.at = Date.now();
+        next.pending = null;
+      }
       return mapped;
     },
     error => {
-      discoverCache.pending = null;
+      if (discoverCache === next) next.pending = null;
       throw error;
     },
   );
-  discoverCache = { ...discoverCache, pending };
+  next.pending = pending;
   return pending;
 }
 
@@ -760,14 +899,14 @@ async function savedPlaylistKeys() {
 function sameAlbum(item, source, raw, name) {
   const info = albumRaw(item);
   if (info.source !== source) return false;
-  if (raw && info.raw && String(info.raw) === String(raw)) return true;
+  if (raw && info.raw) return String(info.raw) === String(raw);
   return Boolean(name && String(item?.name ?? item?.albumName ?? "").trim() === name);
 }
 
 function sameArtist(item, source, raw, name) {
   const info = artistRaw(item);
   if (info.source !== source) return false;
-  if (raw && info.raw && String(info.raw) === String(raw)) return true;
+  if (raw && info.raw) return String(info.raw) === String(raw);
   return Boolean(name && String(item?.name ?? item?.singer ?? "").trim() === name);
 }
 
@@ -801,9 +940,9 @@ async function albumPage(id) {
     });
     const first = Array.isArray(list) ? list[0] : null;
     if (!first) throw fail("unavailable", tr("No matching album found."));
-    raw = String(first.id ?? first.albumId ?? first.albumMid ?? "").trim();
+    raw = stripSourcePrefix(first.id ?? first.albumId ?? first.albumMid ?? "", source);
     name = String(first.name ?? name);
-    image = String(first.picUrl ?? first.img ?? "");
+    image = absoluteUrl(first.picUrl ?? first.img);
     const artistName = String(first.artistName ?? first.singer ?? "").trim();
     const artistRaw = first.artistId ?? first.artistMid ?? "";
     artists = artistName
@@ -824,7 +963,7 @@ async function albumPage(id) {
   const album = {
     id: albumIdFor(source, raw),
     name: String(data?.name || name || first?.albumName || first?.meta?.albumName || "").trim(),
-    imageUrl: String(image || first?.img || first?.meta?.picUrl || "").trim(),
+    imageUrl: absoluteUrl(image || first?.img || first?.meta?.picUrl),
     artists: artists.length ? artists : toArtists(first?.singer ?? first?.artists, source),
     released: dateOnly(data?.publishTime) || released,
   };
@@ -845,9 +984,9 @@ async function artistPage(id) {
     });
     const first = Array.isArray(list) ? list[0] : null;
     if (!first) throw fail("unavailable", tr("No matching artist found."));
-    raw = String(first.id ?? first.artistId ?? first.artistMid ?? "").trim();
+    raw = stripSourcePrefix(first.id ?? first.artistId ?? first.artistMid ?? "", source);
     name = String(first.name ?? name);
-    image = String(first.picUrl ?? first.avatar ?? first.img ?? "");
+    image = absoluteUrl(first.picUrl ?? first.avatar ?? first.img);
   }
   if (!raw) throw fail("unavailable", tr("The artist wasn't found."));
   const [detail, firstPage, secondPage, albums] = await Promise.all([
@@ -875,7 +1014,7 @@ async function artistPage(id) {
   const artist = {
     id: artistIdFor(source, raw),
     name: String(detail?.name || name || "").trim(),
-    imageUrl: String(detail?.avatar || image || "").trim(),
+    imageUrl: absoluteUrl(detail?.avatar || image),
   };
   artist.following = await isFollowedArtist(source, raw);
   const albumItems = albums && Array.isArray(albums.list) ? albums.list : [];
@@ -930,7 +1069,12 @@ async function boardDetail(source, raw) {
     const parsed = parseEntityId(item.id, "b");
     return parsed && String(parsed.raw) === String(raw);
   });
-  return { name: board?.name || tr("Chart"), songs: all.slice(0, PLAYLIST_CAP), total };
+  return {
+    name: board?.name || tr("Chart"),
+    imageUrl: board?.imageUrl || "",
+    songs: all.slice(0, PLAYLIST_CAP),
+    total,
+  };
 }
 
 export async function setSetting({ key }) {
@@ -941,9 +1085,13 @@ export async function setSetting({ key }) {
     clearCaches();
     return;
   }
-  if (name === "username" || name === "password" || name === "playerPassword") {
-    resetAuth();
+  if (name === "username" || name === "password") {
+    resetUserAuth();
     clearCaches();
+    return;
+  }
+  if (name === "playerPassword") {
+    resetPlayerAuth();
     return;
   }
   if (name === "source") clearCaches();
@@ -965,16 +1113,29 @@ export async function signOut() {
       await raw("/api/user/logout", { method: "POST" });
     } catch {}
   }
-  state.userCookie = "";
-  state.signedOut = true;
+  authState = { ...auth(), userCookie: "", userName: "", signedOut: true };
+  playerLoginPending = null;
+  userLoginPending = null;
   saveAuth();
   clearCaches();
 }
 
 export async function account() {
   try {
-    const name = await ensureUser();
-    return name ? accountInfo(name) : null;
+    if (!hasAccount() || auth().signedOut) return null;
+    if (!auth().userCookie) return accountInfo(await loginUser());
+    const result = await raw("/api/user/auth/verify");
+    if (result.ok && result.data && result.data.valid === true) {
+      const name = String(result.data.username || auth().userName || username());
+      if (auth().userName !== name) {
+        auth().userName = name;
+        saveAuth();
+      }
+      return accountInfo(name);
+    }
+    if (!result.ok && result.status !== 401) throw decode(result);
+    clearUserCookie();
+    return accountInfo(await loginUser());
   } catch (error) {
     if (error && error.code === "signIn") return null;
     throw error;
@@ -1130,7 +1291,7 @@ export async function playlist({ id }) {
     return {
       id: text,
       name: String(detail.info.name || tr("Playlist")),
-      imageUrl: String(detail.info.img || ""),
+      imageUrl: absoluteUrl(detail.info.img),
       description: String(detail.info.desc || ""),
       owner: String(detail.info.author || ""),
       trackCount: detail.total || detail.songs.length,
@@ -1144,6 +1305,7 @@ export async function playlist({ id }) {
     return {
       id: text,
       name: detail.name,
+      imageUrl: detail.imageUrl,
       description: tr("Chart"),
       trackCount: detail.total || detail.songs.length,
       saved: await isSavedPlaylist(board.source, board.raw),
@@ -1361,7 +1523,7 @@ function toLibraryAlbum(item) {
   return {
     id: raw ? albumIdFor(source, raw) : albumNameId(source, name),
     name,
-    imageUrl: String(item?.picUrl ?? item?.img ?? "").trim(),
+    imageUrl: absoluteUrl(item?.picUrl ?? item?.img),
     artists: toArtists(item?.singer ?? item?.artistName, source),
     released: dateOnly(item?.publishTime),
     saved: true,
@@ -1390,6 +1552,7 @@ export async function saveAlbum({ id, on }) {
       albumName: page.album.name,
       singer: (page.album.artists || []).map(artist => artist.name).join("、"),
       picUrl: page.album.imageUrl,
+      publishTime: page.album.released,
       source: real.source,
     });
     await api("/api/user/library/albums", { method: "POST", user: true, body: items });
@@ -1482,12 +1645,14 @@ function audioType(url, quality) {
 
 function streamUrl(rawUrl, type, song, data) {
   const base = serverBase();
-  if (rawUrl.startsWith("/")) return base + rawUrl;
-  if (rawUrl.startsWith("//")) return `${base.split(":")[0]}:${rawUrl}`;
+  const url = rawUrl.startsWith("//") ? `${base.split(":")[0]}:${rawUrl}` : rawUrl;
+  if (url.startsWith("/")) return base + url;
+  if (url.startsWith(`${base}/`) || url === base) return url;
   const token = String(data?.downloadToken ?? "").trim();
-  if (!token) return rawUrl;
+  if (!token) return url;
   const name = `${String(song?.name || "audio").trim() || "audio"}.${type}`;
-  return `${base}/api/music/download?url=${encodeURIComponent(rawUrl)}&token=${encodeURIComponent(token)}&inline=1&filename=${encodeURIComponent(name)}`;
+  const query = new URLSearchParams({ url, token, inline: "1", filename: name });
+  return `${base}/api/music/download?${query}`;
 }
 
 export async function stream({ id, quality }) {
@@ -1500,6 +1665,7 @@ export async function stream({ id, quality }) {
       const data = await api("/api/music/url", {
         method: "POST",
         body: { songInfo: song, quality: attempt.quality, enableAutoSwitchApiSource: true },
+        timeout: 14_000,
       });
       const rawUrl = String(data?.url ?? "").trim();
       if (!rawUrl) throw fail("unavailable", tr("The server didn't return an audio address."));

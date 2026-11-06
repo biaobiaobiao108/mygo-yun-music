@@ -4,6 +4,7 @@ function makeHost(settings = {}, initial = {}) {
   const data = initial && Object.keys(initial).length ? JSON.parse(JSON.stringify(initial)) : {};
   const values = { ...settings };
   return {
+    dir: "C:\\Plugins\\yun-music",
     setting: key => values[key] ?? "",
     t: text => text,
     storage: {
@@ -39,6 +40,22 @@ function plain(text, status = 200) {
     headers: { getSetCookie: () => [], get: () => null },
     text: async () => text,
   };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate) {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  throw new Error("condition did not become true");
 }
 
 const song = {
@@ -195,6 +212,26 @@ describe("mapping", () => {
     expect(playlist.tracks[0].id).toBe("t:wy:186016");
   });
 
+  test("server-relative images are made absolute", async () => {
+    configOff();
+    route("GET", "/api/music/leaderboard/boards", () =>
+      response({ list: [{ bangid: "1", name: "飙升榜", img: "/music/assets/chart.png" }] }),
+    );
+    const page = await plugin.browse({ page: "charts" });
+    expect(page.sections[0].playlists[0].imageUrl).toBe("http://music.local:9527/music/assets/chart.png");
+  });
+
+  test("a chart page keeps the chart cover", async () => {
+    configOff();
+    route("GET", "/api/music/leaderboard/list", () => response({ list: [song], total: 1 }));
+    route("GET", "/api/music/leaderboard/boards", () =>
+      response({ list: [{ bangid: "1", name: "飙升榜", img: "https://p1.music.126.net/chart.jpg" }] }),
+    );
+    const page = await plugin.playlist({ id: "b:wy:1" });
+    expect(page.name).toBe("飙升榜");
+    expect(page.imageUrl).toBe("https://p1.music.126.net/chart.jpg");
+  });
+
   test("lyrics map", async () => {
     configOff();
     route("GET", "/api/music/lyric", () => response({ lyric: "[00:01.00]line", tlyric: "[00:01.00]翻译" }));
@@ -235,6 +272,15 @@ describe("playback", () => {
     expect(result.type).toBe("mp3");
     expect(result.quality).toBe("high");
   });
+
+  test("stream relays protocol-relative audio urls", async () => {
+    configOff();
+    route("POST", "/api/music/url", () => response({ url: "//cdn.example.com/a.mp3", downloadToken: "tok" }));
+    const result = await plugin.stream({ id: "t:wy:1", quality: "high" });
+    expect(result.url).toBe(
+      "http://music.local:9527/api/music/download?url=http%3A%2F%2Fcdn.example.com%2Fa.mp3&token=tok&inline=1&filename=audio.mp3",
+    );
+  });
 });
 
 describe("authentication", () => {
@@ -263,6 +309,86 @@ describe("authentication", () => {
       error = caught;
     }
     expect(error?.code).toBe("setup");
+  });
+
+  test("a rejected player password is a setup error", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy", playerPassword: "wrong" });
+    await plugin.setSetting({ key: "server" });
+    route("GET", "/api/music/config", () => response({ "player.enableAuth": true }));
+    route("POST", "/api/music/auth", () => response({ message: "播放器密码错误" }, 401));
+    let error;
+    try {
+      await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.code).toBe("setup");
+    expect(error?.message).toBe("播放器密码错误");
+  });
+
+  test("concurrent account checks share one login", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    configOff();
+    let logins = 0;
+    route("POST", "/api/user/login", () => {
+      logins += 1;
+      return response({ success: true, username: "tester" }, 200, ["lx_user_session=user123; Path=/; HttpOnly"]);
+    });
+    const [first, second] = await Promise.all([plugin.account(), plugin.account()]);
+    expect(first.name).toBe("tester");
+    expect(second.name).toBe("tester");
+    expect(logins).toBe(1);
+  });
+
+  test("regular account requests do not verify the session each time", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    configOff();
+    route("POST", "/api/user/login", () =>
+      response({ success: true, username: "tester" }, 200, ["lx_user_session=user123; Path=/; HttpOnly"]),
+    );
+    let verifies = 0;
+    route("GET", "/api/user/auth/verify", () => {
+      verifies += 1;
+      return response({ valid: true, username: "tester" });
+    });
+    route("GET", "/api/user/list", () => response({ userList: [], loveList: [] }));
+    await plugin.account();
+    expect(verifies).toBe(0);
+    await plugin.account();
+    expect(verifies).toBe(1);
+    await plugin.playlists();
+    expect(verifies).toBe(1);
+  });
+
+  test("changing player password keeps the listener signed in", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+      playerPassword: "old",
+    });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    await plugin.account();
+    const signedIn = { ...globalThis.host.__data.auth };
+    await plugin.setSetting({ key: "playerPassword" });
+    expect(globalThis.host.__data.auth).toEqual({ ...signedIn, playerCookie: "" });
+    await plugin.setSetting({ key: "username" });
+    expect(globalThis.host.__data.auth.userCookie).toBe("");
+    expect(globalThis.host.__data.auth.signedOut).toBe(false);
   });
 
   test("account login, playlists, likes and removal", async () => {
@@ -297,7 +423,7 @@ describe("authentication", () => {
     expect(lists[0].mine).toBe(true);
 
     const account = await plugin.account();
-    expect(account.imageUrl).toBe("http://music.local:9527/music/assets/yun-yin-favicon.png");
+    expect(account.imageUrl).toBe("file:///C:/Plugins/yun-music/icon.png");
 
     const liked = await plugin.liked({ offset: 0 });
     expect(liked.tracks[0].id).toBe("t:wy:186016");
@@ -335,7 +461,7 @@ describe("pages and writes", () => {
     expect(page.sections[0].playlists[0].id).toBe("b:wy:1");
     expect(page.sections[0].playlists[0].imageUrl).toBe("https://p1.music.126.net/chart.jpg");
     expect(page.sections[0].playlists[1].imageUrl).toBe(
-      "http://music.local:9527/music/assets/yun-yin-favicon.png",
+      "file:///C:/Plugins/yun-music/icon.png",
     );
     expect(page.sections[1].playlists[0].id).toBe("p:wy:9");
   });
@@ -361,6 +487,30 @@ describe("pages and writes", () => {
     expect(saved[0].id).toBe("18875");
     expect(saved[0].name).toBe("叶惠美");
     expect(saved[0].source).toBe("wy");
+  });
+
+  test("unsaving an album leaves another edition with the same name", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    route("GET", "/api/user/library/albums", () =>
+      response([
+        { id: "1", name: "同名专辑", source: "wy" },
+        { id: "2", name: "同名专辑", source: "wy" },
+      ]),
+    );
+    let saved = null;
+    route("POST", "/api/user/library/albums", (_parsed, init) => {
+      saved = JSON.parse(init.body);
+      return response({ success: true });
+    });
+    await plugin.saveAlbum({ id: "al:wy:2", on: false });
+    expect(saved.map(item => item.id)).toEqual(["1"]);
   });
 
   test("savePlaylist toggles an online playlist", async () => {
@@ -450,6 +600,37 @@ describe("pages and writes", () => {
     expect(legacyBody.items[0].songmid).toBe(186016);
   });
 
+  test("an in-flight playlist load cannot repopulate another server's cache", async () => {
+    globalThis.host = makeHost({
+      server: "http://first.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    configOff();
+    route("POST", "/api/user/login", () =>
+      response({ success: true, username: "tester" }, 200, ["lx_user_session=user123; Path=/; HttpOnly"]),
+    );
+    const first = deferred();
+    route("GET", "/api/user/list", () => first.promise);
+    const early = plugin.playlists();
+    await waitFor(() => calls.some(call => call.method === "GET" && call.path === "/api/user/list"));
+
+    globalThis.host.__settings.server = "http://second.local:9527";
+    await plugin.setSetting({ key: "server" });
+    routes = routes.filter(item => !(item.method === "GET" && item.path === "/api/user/list"));
+    route("GET", "/api/user/list", () =>
+      response({ userList: [{ id: "new_list", name: "新歌单", list: [] }], loveList: [] }),
+    );
+
+    const fresh = await plugin.playlists();
+    expect(fresh[0].name).toBe("新歌单");
+    first.resolve(response({ userList: [{ id: "old_list", name: "旧歌单", list: [] }], loveList: [] }));
+    await early;
+    expect((await plugin.playlists())[0].name).toBe("新歌单");
+  });
+
   test("changing the server forgets sessions and songs", async () => {
     configOff();
     route("GET", "/api/music/search", () => response([song]));
@@ -457,6 +638,36 @@ describe("pages and writes", () => {
     expect(globalThis.host.__data.songs).toBeDefined();
     await plugin.setSetting({ key: "server" });
     expect(globalThis.host.__data.songs).toBeUndefined();
-    expect(globalThis.host.__data.auth).toEqual({ playerCookie: "", userCookie: "", signedOut: false });
+    expect(globalThis.host.__data.auth).toEqual({
+      playerCookie: "",
+      userCookie: "",
+      userName: "",
+      signedOut: false,
+    });
+  });
+});
+
+describe("server address", () => {
+  test("accepts a browser address and removes /music", async () => {
+    globalThis.host = makeHost({ server: "music.local:9527/music/#/home", source: "wy" });
+    await plugin.setSetting({ key: "server" });
+    configOff();
+    route("GET", "/api/music/search", () => response([song]));
+    const result = await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+    expect(result.tracks.length).toBe(1);
+    expect(calls.map(call => call.path)).toEqual(["/api/music/config", "/api/music/search"]);
+  });
+
+  test("rejects credentials in the address", async () => {
+    globalThis.host = makeHost({ server: "http://user:secret@music.local:9527", source: "wy" });
+    await plugin.setSetting({ key: "server" });
+    let error;
+    try {
+      await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.code).toBe("setup");
+    expect(calls.length).toBe(0);
   });
 });

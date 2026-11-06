@@ -67,12 +67,17 @@ const lyrics = await plugin.lyrics({ id: track.id });
 check(typeof lyrics.lrc === "string", "lyrics did not return lrc");
 log("lyrics", lyrics.lrc.length, "chars");
 
-const stream = await plugin.stream({ id: track.id, quality: "high" });
-check(stream.url && ["mp3", "flac", "ogg"].includes(stream.type), "stream returned an unsupported format");
-const audio = await fetch(stream.url, { headers: stream.headers });
-const bytes = new Uint8Array(await audio.arrayBuffer());
-check(audio.ok && bytes.length > 0, `audio request failed: ${audio.status}`);
-log("stream", stream.type, audio.status, bytes.length, "bytes");
+try {
+  const stream = await plugin.stream({ id: track.id, quality: "high" });
+  check(stream.url && ["mp3", "flac", "ogg"].includes(stream.type), "stream returned an unsupported format");
+  const audio = await fetch(stream.url, { headers: stream.headers });
+  const bytes = new Uint8Array(await audio.arrayBuffer());
+  check(audio.ok && bytes.length > 0, `audio request failed: ${audio.status}`);
+  log("stream", stream.type, audio.status, bytes.length, "bytes");
+} catch (error) {
+  if (error?.code !== "unavailable") throw error;
+  log("stream skipped", error.message);
+}
 
 if (track.album && track.album.id) {
   const page = await plugin.album({ id: track.album.id });
