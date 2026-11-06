@@ -273,6 +273,16 @@ describe("playback", () => {
     expect(result.quality).toBe("high");
   });
 
+  test("stream reports the quality the server actually returned", async () => {
+    configOff();
+    route("POST", "/api/music/url", () =>
+      response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok", quality: "128k" }),
+    );
+    const result = await plugin.stream({ id: "t:wy:1", quality: "high" });
+    expect(result.type).toBe("mp3");
+    expect(result.quality).toBe("standard");
+  });
+
   test("stream relays protocol-relative audio urls", async () => {
     configOff();
     route("POST", "/api/music/url", () => response({ url: "//cdn.example.com/a.mp3", downloadToken: "tok" }));
@@ -598,6 +608,81 @@ describe("pages and writes", () => {
     });
     await plugin.played({ id: "t:wy:186016" });
     expect(legacyBody.items[0].songmid).toBe(186016);
+  });
+
+  test("played queues an online playback for the server cache", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    route("GET", "/api/music/search", () => response([song]));
+    let streamCookie = "";
+    route("POST", "/api/music/url", (_parsed, init) => {
+      streamCookie = init.headers.Cookie || "";
+      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+    });
+    route("GET", "/api/user/settings", () =>
+      response({ enableServerCache: true, enableServerLyricCache: false, embedLyricToFile: false }),
+    );
+    let queue = null;
+    route("POST", "/api/music/cache/queue", (_parsed, init) => {
+      queue = JSON.parse(init.body);
+      return response({ success: true, data: [] });
+    });
+    route("POST", "/api/user/play-history/events", () => response({ items: [] }));
+
+    await plugin.search({ query: "晴天", kind: "tracks", offset: 0 });
+    await plugin.stream({ id: "t:wy:186016", quality: "high" });
+    await plugin.played({ id: "t:wy:186016" });
+
+    expect(queue.tasks.length).toBe(1);
+    expect(queue.tasks[0].resolvedUrl).toBe("https://cdn.example.com/a.mp3");
+    expect(queue.tasks[0].quality).toBe("320k");
+    expect(queue.tasks[0].background).toBe(true);
+    expect(queue.tasks[0].cacheLyric).toBe(false);
+    expect(queue.tasks[0].embedLyric).toBe(false);
+    expect(queue.tasks[0].songInfo.songmid).toBe(186016);
+    expect(streamCookie).toContain("lx_user_session=user123");
+  });
+
+  test("played respects the server cache setting and skips cached playback", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    route("GET", "/api/music/search", () => response([song]));
+    route("POST", "/api/music/url", () => response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" }));
+    route("GET", "/api/user/settings", () => response({ enableServerCache: false }));
+    let queued = false;
+    route("POST", "/api/music/cache/queue", () => {
+      queued = true;
+      return response({ success: true, data: [] });
+    });
+    route("POST", "/api/user/play-history/events", () => response({ items: [] }));
+
+    await plugin.search({ query: "晴天", kind: "tracks", offset: 0 });
+    await plugin.stream({ id: "t:wy:186016", quality: "high" });
+    await plugin.played({ id: "t:wy:186016" });
+    expect(queued).toBe(false);
+
+    await plugin.setSetting({ key: "source" });
+    routes = routes.filter(item => !(item.method === "POST" && item.path === "/api/music/url"));
+    route("POST", "/api/music/url", () =>
+      response({ url: "/api/music/cache/file/_open/a.mp3?folder=cache", fromCache: true }),
+    );
+    routes = routes.filter(item => !(item.method === "GET" && item.path === "/api/user/settings"));
+    route("GET", "/api/user/settings", () => response({ enableServerCache: true }));
+    await plugin.stream({ id: "t:wy:186016", quality: "high" });
+    await plugin.played({ id: "t:wy:186016" });
+    expect(queued).toBe(false);
   });
 
   test("an in-flight playlist load cannot repopulate another server's cache", async () => {

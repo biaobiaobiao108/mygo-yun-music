@@ -13,6 +13,9 @@ const LIBRARY_TTL = 60_000;
 const BOARDS_TTL = 10 * 60_000;
 const CONFIG_TTL = 5 * 60_000;
 const HTTP_TIMEOUT = 15_000;
+const USER_SETTINGS_TTL = 60_000;
+const PLAYBACK_CACHE_TTL = 5 * 60_000;
+const PLAYBACK_CACHE_CAP = 100;
 
 function setting(key) {
   return String(host.setting(key) || "");
@@ -38,6 +41,8 @@ let libraryCache = {
 };
 let boardsCache = { source: "", at: 0, data: null, pending: null };
 let discoverCache = { source: "", at: 0, data: null, pending: null };
+let userSettingsCache = { at: 0, data: null, pending: null };
+let playbackCache = new Map();
 let playerLoginPending = null;
 let userLoginPending = null;
 
@@ -107,6 +112,8 @@ function clearCaches() {
   libraryCache = { albums: emptySlot(), artists: emptySlot() };
   boardsCache = { source: "", at: 0, data: null, pending: null };
   discoverCache = { source: "", at: 0, data: null, pending: null };
+  userSettingsCache = { at: 0, data: null, pending: null };
+  playbackCache.clear();
 }
 
 function clearListCache() {
@@ -775,6 +782,87 @@ async function library(kind, force = false) {
   );
   slot.pending = pending;
   return pending;
+}
+
+async function userSettings() {
+  const slot = userSettingsCache;
+  if (slot.data && Date.now() - slot.at < USER_SETTINGS_TTL) return slot.data;
+  if (slot.pending) return slot.pending;
+  const pending = api("/api/user/settings", { user: true }).then(
+    data => {
+      const settings = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+      if (userSettingsCache === slot) userSettingsCache = { at: Date.now(), data: settings, pending: null };
+      return settings;
+    },
+    error => {
+      if (userSettingsCache === slot) slot.pending = null;
+      throw error;
+    },
+  );
+  slot.pending = pending;
+  return pending;
+}
+
+async function cacheSettings() {
+  try {
+    return await userSettings();
+  } catch (error) {
+    // Servers from before the settings endpoint existed used the same
+    // defaults as the web player, so an unavailable endpoint isn't fatal.
+    if (error?.code === "unavailable") return {};
+    throw error;
+  }
+}
+
+function cacheTaskId(song) {
+  const id = songKey(song).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160);
+  return id || `mygo_${Date.now()}`;
+}
+
+function rememberPlayback(id, entry) {
+  playbackCache.delete(id);
+  playbackCache.set(id, entry);
+  while (playbackCache.size > PLAYBACK_CACHE_CAP) {
+    playbackCache.delete(playbackCache.keys().next().value);
+  }
+}
+
+async function enqueuePlaybackCache(id) {
+  const entry = playbackCache.get(id);
+  if (!entry || entry.fromCache || entry.queued) return;
+  if (Date.now() - entry.at > PLAYBACK_CACHE_TTL) {
+    playbackCache.delete(id);
+    return;
+  }
+  const song = lookupSong(id) || entry.song;
+  if (!song || !entry.sourceUrl) return;
+  const settings = await cacheSettings();
+  if (settings.enableServerCache === false) return;
+  entry.queued = true;
+  try {
+    await api("/api/music/cache/queue", {
+      method: "POST",
+      user: true,
+      body: {
+        tasks: [
+          {
+            id: cacheTaskId(song),
+            songInfo: songForList(song),
+            quality: entry.quality,
+            background: true,
+            cacheLyric: settings.enableServerLyricCache !== false,
+            embedLyric: settings.embedLyricToFile !== false,
+            resolvedUrl: entry.sourceUrl,
+          },
+        ],
+      },
+    });
+  } catch (error) {
+    entry.queued = false;
+    if (error?.code !== "unavailable") {
+      console.warn("YunLu Music: couldn't queue the server cache:", error?.message || error);
+    }
+  }
 }
 
 function setLibrary(kind, list) {
@@ -1499,8 +1587,12 @@ export async function recent() {
 
 export async function played({ id }) {
   if (!hasAccount() || auth().signedOut) return;
+  const cacheTask = enqueuePlaybackCache(id).catch(() => {});
   const song = lookupSong(id);
-  if (!song) return;
+  if (!song) {
+    await cacheTask;
+    return;
+  }
   const item = { ...songForList(song), playedAt: Date.now() };
   try {
     await api("/api/user/play-history/events", {
@@ -1513,6 +1605,8 @@ export async function played({ id }) {
     try {
       await api("/api/user/play-history", { method: "POST", user: true, body: { items: [item] } });
     } catch {}
+  } finally {
+    await cacheTask;
   }
 }
 
@@ -1643,6 +1737,17 @@ function audioType(url, quality) {
   return quality === "flac" ? "flac" : "mp3";
 }
 
+function playbackQuality(type, reported, fallback) {
+  const value = String(reported || "").toLowerCase();
+  if (value === "flac" || value === "lossless" || value === "hires" || value === "master" || value === "atmos") {
+    return { level: "lossless", cache: "flac" };
+  }
+  if (value === "128k" || value === "standard") return { level: "standard", cache: "128k" };
+  if (value === "320k" || value === "high") return { level: "high", cache: "320k" };
+  if (type === "flac") return { level: "lossless", cache: "flac" };
+  return { level: fallback === "128k" ? "standard" : "high", cache: fallback };
+}
+
 function streamUrl(rawUrl, type, song, data) {
   const base = serverBase();
   const url = rawUrl.startsWith("//") ? `${base.split(":")[0]}:${rawUrl}` : rawUrl;
@@ -1662,22 +1767,44 @@ export async function stream({ id, quality }) {
   let lastError = null;
   for (const attempt of qualityAttempts(quality)) {
     try {
-      const data = await api("/api/music/url", {
+      const useUser = hasAccount() && !auth().signedOut;
+      const request = {
         method: "POST",
         body: { songInfo: song, quality: attempt.quality, enableAutoSwitchApiSource: true },
+        user: useUser,
         timeout: 14_000,
-      });
+      };
+      let data;
+      try {
+        data = await api("/api/music/url", request);
+      } catch (error) {
+        if (!useUser || error?.code !== "signIn") throw error;
+        data = await api("/api/music/url", { ...request, user: false });
+      }
       const rawUrl = String(data?.url ?? "").trim();
       if (!rawUrl) throw fail("unavailable", tr("The server didn't return an audio address."));
       const type = audioType(rawUrl, attempt.quality);
       if (!type) throw fail("unavailable", tr("MyGo Music can't play this audio format. Try another quality."));
-      const level = type === "flac" ? "lossless" : attempt.level === "lossless" ? "high" : attempt.level;
+      const playback = playbackQuality(type, data?.quality, attempt.quality);
       const url = streamUrl(rawUrl, type, song, data);
+      const sourceUrl = rawUrl.startsWith("//")
+        ? `${serverBase().split(":")[0]}:${rawUrl}`
+        : rawUrl.startsWith("/")
+          ? serverBase() + rawUrl
+          : rawUrl;
       const cookie = cookieHeader();
+      rememberPlayback(id, {
+        song: songForList(song),
+        quality: playback.cache,
+        sourceUrl,
+        fromCache: Boolean(data?.fromCache) || url.includes("/api/music/cache/file/"),
+        at: Date.now(),
+        queued: false,
+      });
       return {
         url,
         type,
-        quality: level,
+        quality: playback.level,
         headers: cookie && url.startsWith(`${serverBase()}/`) ? { Cookie: cookie } : undefined,
       };
     } catch (error) {

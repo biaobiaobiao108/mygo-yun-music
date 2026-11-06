@@ -1,7 +1,7 @@
 {
   "id": "yun-music",
   "name": "YunLu Music",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "0.1.8",
   "main": "index.js",
   "playback": "stream",
