@@ -111,6 +111,22 @@ function accountRoutes(listData) {
   route("GET", "/api/user/list", () => response(listData));
 }
 
+function playbackRoutes(settings = {}) {
+  routes = routes.filter(item => item.path !== "/api/user/playback-settings");
+  route("GET", "/api/user/playback-settings", () =>
+    response({
+      defaultSource: "wy",
+      preferredQuality: "flac",
+      enableAutoSwitchSource: true,
+      enableAutoDegradeQuality: true,
+      enableServerCache: true,
+      enableServerLyricCache: true,
+      embedLyricToFile: true,
+      ...settings,
+    }),
+  );
+}
+
 globalThis.host = makeHost();
 const plugin = await import("../index.js");
 
@@ -118,6 +134,7 @@ beforeEach(async () => {
   routes = [];
   calls = [];
   globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy" });
+  playbackRoutes();
   await plugin.setSetting({ key: "server" });
   globalThis.fetch = async (url, init = {}) => dispatch(String(url), init);
 });
@@ -139,6 +156,21 @@ describe("mapping", () => {
     expect(result.tracks[0].album.id).toBe("al:wy:18875");
     expect(result.tracks[0].url).toContain("music.163.com");
     expect(result.more).toBe(false);
+  });
+
+  test("search follows the web player's default source when no override is set", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", source: "" });
+    await plugin.setSetting({ key: "server" });
+    configOff();
+    playbackRoutes({ defaultSource: "tx" });
+    let requestedSource = "";
+    route("GET", "/api/music/search", parsed => {
+      requestedSource = parsed.searchParams.get("source");
+      return response([{ ...song, source: "tx", songmid: 42, id: 42 }]);
+    });
+    const result = await plugin.search({ query: "晴天", kind: "tracks", offset: 0 });
+    expect(requestedSource).toBe("tx");
+    expect(result.tracks[0].id).toBe("t:tx:42");
   });
 
   test("search maps albums, artists and playlists", async () => {
@@ -256,6 +288,7 @@ describe("playback", () => {
     expect(relayed.url).toBe(
       "http://music.local:9527/api/music/download?url=https%3A%2F%2Fcdn.example.com%2Fa.flac&token=tok&inline=1&filename=audio.flac",
     );
+    await plugin.setSetting({ key: "source" });
     mode = "cache";
     const cached = await plugin.stream({ id: "t:wy:1", quality: "lossless" });
     expect(cached.url).toBe("http://music.local:9527/api/music/cache/file/_open/a.flac?folder=cache");
@@ -281,6 +314,44 @@ describe("playback", () => {
     const result = await plugin.stream({ id: "t:wy:1", quality: "high" });
     expect(result.type).toBe("mp3");
     expect(result.quality).toBe("standard");
+  });
+
+  test("stream follows the web player's source-switch setting", async () => {
+    configOff();
+    playbackRoutes({ enableAutoSwitchSource: false });
+    let body = null;
+    route("POST", "/api/music/url", (_parsed, init) => {
+      body = JSON.parse(init.body);
+      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+    });
+    await plugin.stream({ id: "t:wy:1", quality: "high" });
+    expect(body.enableAutoSwitchApiSource).toBe(false);
+  });
+
+  test("stream doesn't lower the quality when the web player disables it", async () => {
+    configOff();
+    playbackRoutes({ enableAutoDegradeQuality: false });
+    route("POST", "/api/music/url", () => response({ message: "no flac" }, 422));
+    let error;
+    try {
+      await plugin.stream({ id: "t:wy:1", quality: "lossless" });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.code).toBe("unavailable");
+    expect(calls.filter(call => call.method === "POST" && call.path === "/api/music/url")).toHaveLength(1);
+  });
+
+  test("stream reuses a recent playback address", async () => {
+    configOff();
+    let requests = 0;
+    route("POST", "/api/music/url", () => {
+      requests += 1;
+      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+    });
+    await plugin.stream({ id: "t:wy:1", quality: "high" });
+    await plugin.stream({ id: "t:wy:1", quality: "high" });
+    expect(requests).toBe(1);
   });
 
   test("stream relays protocol-relative audio urls", async () => {
@@ -625,18 +696,23 @@ describe("pages and writes", () => {
       streamCookie = init.headers.Cookie || "";
       return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
     });
-    route("GET", "/api/user/settings", () =>
-      response({ enableServerCache: true, enableServerLyricCache: false, embedLyricToFile: false }),
-    );
+    playbackRoutes({ enableServerCache: true, enableServerLyricCache: false, embedLyricToFile: false });
     let queue = null;
+    let queueCalls = 0;
     route("POST", "/api/music/cache/queue", (_parsed, init) => {
+      queueCalls += 1;
       queue = JSON.parse(init.body);
       return response({ success: true, data: [] });
     });
-    route("POST", "/api/user/play-history/events", () => response({ items: [] }));
+    let history = null;
+    route("POST", "/api/user/play-history/events", (_parsed, init) => {
+      history = JSON.parse(init.body);
+      return response({ items: [] });
+    });
 
     await plugin.search({ query: "晴天", kind: "tracks", offset: 0 });
     await plugin.stream({ id: "t:wy:186016", quality: "high" });
+    await plugin.played({ id: "t:wy:186016" });
     await plugin.played({ id: "t:wy:186016" });
 
     expect(queue.tasks.length).toBe(1);
@@ -646,6 +722,8 @@ describe("pages and writes", () => {
     expect(queue.tasks[0].cacheLyric).toBe(false);
     expect(queue.tasks[0].embedLyric).toBe(false);
     expect(queue.tasks[0].songInfo.songmid).toBe(186016);
+    expect(queueCalls).toBe(1);
+    expect(history.events[0].song.quality).toBe("320k");
     expect(streamCookie).toContain("lx_user_session=user123");
   });
 
@@ -660,7 +738,7 @@ describe("pages and writes", () => {
     accountRoutes({ defaultList: [], loveList: [], userList: [] });
     route("GET", "/api/music/search", () => response([song]));
     route("POST", "/api/music/url", () => response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" }));
-    route("GET", "/api/user/settings", () => response({ enableServerCache: false }));
+    playbackRoutes({ enableServerCache: false });
     let queued = false;
     route("POST", "/api/music/cache/queue", () => {
       queued = true;
@@ -678,8 +756,7 @@ describe("pages and writes", () => {
     route("POST", "/api/music/url", () =>
       response({ url: "/api/music/cache/file/_open/a.mp3?folder=cache", fromCache: true }),
     );
-    routes = routes.filter(item => !(item.method === "GET" && item.path === "/api/user/settings"));
-    route("GET", "/api/user/settings", () => response({ enableServerCache: true }));
+    playbackRoutes({ enableServerCache: true });
     await plugin.stream({ id: "t:wy:186016", quality: "high" });
     await plugin.played({ id: "t:wy:186016" });
     expect(queued).toBe(false);
