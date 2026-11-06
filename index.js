@@ -108,6 +108,10 @@ function serverBase() {
   return raw;
 }
 
+function accountInfo(name) {
+  return { id: name, name, imageUrl: `${serverBase()}/music/assets/yun-yin-favicon.png` };
+}
+
 function sourceId() {
   return setting("source").trim().toLowerCase() === "tx" ? "tx" : "wy";
 }
@@ -392,9 +396,11 @@ function toPlaylist(item, source) {
 
 function toBoard(board, source) {
   const raw = board?.bangid ?? board?.id ?? "";
+  const image = String(board?.img ?? board?.picUrl ?? board?.cover ?? "").trim();
   return {
     id: boardIdFor(source, raw),
     name: String(board?.name ?? "").trim(),
+    imageUrl: image || `${serverBase()}/music/assets/yun-yin-favicon.png`,
     description: tr("Chart"),
   };
 }
@@ -949,7 +955,7 @@ export async function signIn() {
   saveAuth();
   await ensurePlayer();
   const name = await loginUser();
-  return { id: name, name };
+  return accountInfo(name);
 }
 
 export async function signOut() {
@@ -968,7 +974,7 @@ export async function signOut() {
 export async function account() {
   try {
     const name = await ensureUser();
-    return name ? { id: name, name } : null;
+    return name ? accountInfo(name) : null;
   } catch (error) {
     if (error && error.code === "signIn") return null;
     throw error;

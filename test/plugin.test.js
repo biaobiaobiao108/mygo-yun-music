@@ -296,6 +296,9 @@ describe("authentication", () => {
     expect(lists[0].name).toBe("我的歌单");
     expect(lists[0].mine).toBe(true);
 
+    const account = await plugin.account();
+    expect(account.imageUrl).toBe("http://music.local:9527/music/assets/yun-yin-favicon.png");
+
     const liked = await plugin.liked({ offset: 0 });
     expect(liked.tracks[0].id).toBe("t:wy:186016");
     const flags = await plugin.isLiked({ ids: ["t:wy:186016", "t:wy:2"] });
@@ -316,13 +319,24 @@ describe("authentication", () => {
 describe("pages and writes", () => {
   test("home has charts and discover", async () => {
     configOff();
-    route("GET", "/api/music/leaderboard/boards", () => response({ list: [{ bangid: "1", name: "飙升榜" }] }));
+    route("GET", "/api/music/leaderboard/boards", () =>
+      response({
+        list: [
+          { bangid: "1", name: "飙升榜", img: "https://p1.music.126.net/chart.jpg" },
+          { bangid: "2", name: "新歌榜" },
+        ],
+      }),
+    );
     route("GET", "/api/music/songList/list", () =>
       response({ list: [{ id: "9", name: "发现歌单", img: "https://p1.music.126.net/p.jpg", author: "某人", total: 3 }] }),
     );
     const page = await plugin.home();
     expect(page.sections.map(section => section.title)).toEqual(["Charts", "Discover"]);
     expect(page.sections[0].playlists[0].id).toBe("b:wy:1");
+    expect(page.sections[0].playlists[0].imageUrl).toBe("https://p1.music.126.net/chart.jpg");
+    expect(page.sections[0].playlists[1].imageUrl).toBe(
+      "http://music.local:9527/music/assets/yun-yin-favicon.png",
+    );
     expect(page.sections[1].playlists[0].id).toBe("p:wy:9");
   });
 
