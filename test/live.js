@@ -44,8 +44,9 @@ function log(...args) {
   console.log(...args);
 }
 
+let account = null;
 if (settings.username && settings.password) {
-  const account = await plugin.account();
+  account = await plugin.account();
   check(account && account.name, "account login failed");
   log("account", account.name);
 }
@@ -97,6 +98,14 @@ log("comments", comments.comments.length, "of", comments.total);
 const home = await plugin.home();
 check(home.sections.length > 0, "home returned no sections");
 log("home", home.sections.map(section => section.title).join(", "));
+const withPlaylists = home.sections.find(section => section.playlists && section.playlists.length);
+check(withPlaylists && withPlaylists.playlists[0].imageUrl, "home returned no playlist cover");
+const cover = await fetch(withPlaylists.playlists[0].imageUrl);
+check(cover.ok, `playlist cover failed: ${cover.status}`);
+if (account) {
+  const icon = await fetch(account.imageUrl);
+  check(icon.ok, `account icon failed: ${icon.status}`);
+}
 
 if (write) {
   check(settings.username && settings.password, "YUN_MUSIC_WRITE needs an account");
