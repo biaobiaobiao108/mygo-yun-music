@@ -88,7 +88,12 @@ function saveSongs() {
 }
 
 function resetAuth() {
-  authState = { playerCookie: "", userCookie: "", userName: "", signedOut: false };
+  authState = {
+    playerCookie: "",
+    userCookie: "",
+    userName: "",
+    signedOut: false,
+  };
   playerLoginPending = null;
   userLoginPending = null;
   saveAuth();
@@ -168,7 +173,9 @@ function fileUrl(path) {
 }
 
 function pluginIcon() {
-  const dir = String(host.dir ?? "").trim().replace(/[\\/]+$/, "");
+  const dir = String(host.dir ?? "")
+    .trim()
+    .replace(/[\\/]+$/, "");
   return dir ? fileUrl(`${dir}/icon.png`) : absoluteUrl("/music/assets/yun-yin-favicon.png");
 }
 
@@ -352,13 +359,13 @@ function songForList(song) {
 function splitArtistNames(value) {
   if (Array.isArray(value)) {
     return value
-      .map(item => (item && typeof item === "object" ? item.name ?? item.singer ?? "" : item))
-      .map(item => String(item ?? "").trim())
+      .map((item) => (item && typeof item === "object" ? (item.name ?? item.singer ?? "") : item))
+      .map((item) => String(item ?? "").trim())
       .filter(Boolean);
   }
   return String(value ?? "")
     .split(/[、,，;；|]+/)
-    .map(item => item.trim())
+    .map((item) => item.trim())
     .filter(Boolean);
 }
 
@@ -381,7 +388,10 @@ function toArtists(value, source) {
     }
     return out;
   }
-  return splitArtistNames(value).map(name => ({ id: artistNameId(source, name), name }));
+  return splitArtistNames(value).map((name) => ({
+    id: artistNameId(source, name),
+    name,
+  }));
 }
 
 function parseInterval(value) {
@@ -393,7 +403,7 @@ function parseInterval(value) {
     return number > 10000 ? Math.round(number) : Math.round(number * 1000);
   }
   const parts = text.split(":").map(Number);
-  if (!parts.length || parts.some(part => !Number.isFinite(part))) return 0;
+  if (!parts.length || parts.some((part) => !Number.isFinite(part))) return 0;
   if (parts.length === 2) return Math.round((parts[0] * 60 + parts[1]) * 1000);
   if (parts.length === 3) return Math.round((parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000);
   return 0;
@@ -428,13 +438,18 @@ function toTrack(song) {
   const source = songSource(song);
   const meta = songMeta(song);
   const name = String(song?.name ?? meta.name ?? song?.title ?? "").trim();
-  const artistValue = Array.isArray(song?.artists) && song.artists.length ? song.artists : song?.singer ?? meta.singer;
+  const artistValue =
+    Array.isArray(song?.artists) && song.artists.length ? song.artists : (song?.singer ?? meta.singer);
   const artists = toArtists(artistValue, source);
   const albumName = String(song?.albumName ?? meta.albumName ?? song?.album?.name ?? "").trim();
   const albumRaw = song?.albumId ?? meta.albumId ?? song?.album?.id ?? "";
   const image = absoluteUrl(song?.img ?? song?.picUrl ?? meta.picUrl ?? song?.album?.picUrl);
   const album = {
-    id: albumRaw ? albumIdFor(source, stripSourcePrefix(albumRaw, source)) : albumName ? albumNameId(source, albumName) : "",
+    id: albumRaw
+      ? albumIdFor(source, stripSourcePrefix(albumRaw, source))
+      : albumName
+        ? albumNameId(source, albumName)
+        : "",
     name: albumName,
     imageUrl: image,
   };
@@ -457,7 +472,10 @@ function toAlbum(item, source) {
   const artistRaw = item?.artistId ?? item?.artistMid ?? item?.singerId ?? item?.singerMid ?? "";
   const artists = toArtists(artistName, source);
   if (artists.length && artistRaw) {
-    artists[0] = { ...artists[0], id: artistIdFor(source, stripSourcePrefix(artistRaw, source)) };
+    artists[0] = {
+      ...artists[0],
+      id: artistIdFor(source, stripSourcePrefix(artistRaw, source)),
+    };
   }
   return {
     id: raw !== "" ? albumIdFor(source, stripSourcePrefix(raw, source)) : name ? albumNameId(source, name) : "",
@@ -577,7 +595,13 @@ async function raw(path, options = {}) {
       data = null;
     }
   }
-  return { status: response.status, ok: response.ok, data, text, headers: response.headers };
+  return {
+    status: response.status,
+    ok: response.ok,
+    data,
+    text,
+    headers: response.headers,
+  };
 }
 
 function setCookie(headers, name) {
@@ -622,19 +646,18 @@ async function serverConfig() {
   const slot = configCache;
   if (slot.data && Date.now() - slot.at < CONFIG_TTL) return slot.data;
   if (slot.pending) return slot.pending;
-  const pending = raw("/api/music/config").then(
-    result => {
+  const pending = raw("/api/music/config")
+    .then((result) => {
       if (!result.ok) throw decode(result);
       const data = result.data && typeof result.data === "object" ? result.data : {};
       const config = { playerAuth: Boolean(data["player.enableAuth"]) };
       if (configCache === slot) configCache = { at: Date.now(), data: config, pending: null };
       return config;
-    },
-    error => {
+    })
+    .catch((error) => {
       if (configCache === slot) slot.pending = null;
       throw error;
-    },
-  );
+    });
   slot.pending = pending;
   return pending;
 }
@@ -643,11 +666,15 @@ async function loginPlayerNow() {
   const state = auth();
   const value = playerPassword();
   if (!value) throw fail("setup", tr("This server asks for a player password. Set it in the plugin's settings."));
-  const result = await raw("/api/music/auth", { method: "POST", body: { password: value } });
+  const result = await raw("/api/music/auth", {
+    method: "POST",
+    body: { password: value },
+  });
   if (state !== authState) throw new Error(tr("The server settings changed. Try again."));
   if (!result.ok) {
     const message =
-      String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() || tr("Couldn't log in to the server.");
+      String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() ||
+      tr("Couldn't log in to the server.");
     if (result.status === 401) throw fail("setup", message);
     if (result.status === 403 || result.status === 429) throw fail("unavailable", message);
     throw new Error(message);
@@ -690,7 +717,8 @@ async function loginUserNow() {
   if (!result.ok) {
     clearUserCookie();
     const message =
-      String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() || tr("Couldn't log in to the server.");
+      String(result.data?.message ?? result.data?.error ?? result.text ?? "").trim() ||
+      tr("Couldn't log in to the server.");
     if (result.status === 401) throw fail("signIn", message);
     if (result.status === 403 || result.status === 429) throw fail("unavailable", message);
     throw new Error(message);
@@ -736,6 +764,7 @@ function clearUserCookie() {
 }
 
 async function api(path, options = {}) {
+  const state = auth();
   const retried = Boolean(options.retried);
   const needsUser =
     options.user !== undefined ? Boolean(options.user) : path.startsWith("/api/user") || path.includes("/user/");
@@ -744,20 +773,25 @@ async function api(path, options = {}) {
     const name = await ensureUser();
     if (!name) throw fail("signIn", tr("Sign in to YunLu Music first."));
   }
+  if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
+  const sentPlayerCookie = state.playerCookie;
+  const sentUserCookie = state.userCookie;
   const request = { ...options };
   delete request.user;
   delete request.retried;
   const result = await raw(path, request);
+  if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
   if (result.status === 401 && !retried) {
     if (path.startsWith("/api/music")) {
-      clearPlayerCookie();
+      if (state.playerCookie === sentPlayerCookie) clearPlayerCookie();
       configCache = { at: 0, data: null, pending: null };
       await ensurePlayer();
     }
     if (needsUser) {
-      clearUserCookie();
-      await loginUser();
+      if (state.userCookie === sentUserCookie) clearUserCookie();
+      await ensureUser();
     }
+    if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
     return api(path, { ...options, retried: true });
   }
   return decode(result);
@@ -768,7 +802,7 @@ async function userList(force = false) {
   if (!force && slot.data && Date.now() - slot.at < LIST_TTL) return slot.data;
   if (slot.pending) return slot.pending;
   const pending = api("/api/user/list", { user: true }).then(
-    data => {
+    (data) => {
       if (listCache === slot) {
         slot.data = data;
         slot.at = Date.now();
@@ -776,7 +810,7 @@ async function userList(force = false) {
       }
       return data;
     },
-    error => {
+    (error) => {
       if (listCache === slot) slot.pending = null;
       throw error;
     },
@@ -790,7 +824,7 @@ async function library(kind, force = false) {
   if (!force && slot.data && Date.now() - slot.at < LIBRARY_TTL) return slot.data;
   if (slot.pending) return slot.pending;
   const pending = api(`/api/user/library/${kind}`, { user: true }).then(
-    data => {
+    (data) => {
       const list = Array.isArray(data) ? data : [];
       if (libraryCache[kind] === slot) {
         slot.data = list;
@@ -799,7 +833,7 @@ async function library(kind, force = false) {
       }
       return list;
     },
-    error => {
+    (error) => {
       if (libraryCache[kind] === slot) slot.pending = null;
       throw error;
     },
@@ -826,30 +860,36 @@ async function playbackSettings() {
   const slot = playbackSettingsCache;
   if (slot.data && Date.now() - slot.at < USER_SETTINGS_TTL) return slot.data;
   if (slot.pending) return slot.pending;
-  const pending = api("/api/user/playback-settings", { user: false }).then(
-    data => normalizePlaybackSettings(data),
-    async error => {
-      if (error?.code !== "unavailable") return { ...PLAYBACK_SETTINGS_DEFAULTS };
-      try {
-        return normalizePlaybackSettings(await api("/api/user/settings", { user: false }));
-      } catch {
-        return { ...PLAYBACK_SETTINGS_DEFAULTS };
-      }
-    },
-  ).then(
-    settings => {
+  const pending = api("/api/user/playback-settings", { user: false })
+    .then(
+      (data) => normalizePlaybackSettings(data),
+      async (error) => {
+        if (error?.code !== "unavailable") return { ...PLAYBACK_SETTINGS_DEFAULTS };
+        try {
+          return normalizePlaybackSettings(await api("/api/user/settings", { user: false }));
+        } catch {
+          return { ...PLAYBACK_SETTINGS_DEFAULTS };
+        }
+      },
+    )
+    .then((settings) => {
       if (playbackSettingsCache === slot) {
-        playbackSettingsCache = { at: Date.now(), data: settings, pending: null };
+        playbackSettingsCache = {
+          at: Date.now(),
+          data: settings,
+          pending: null,
+        };
       }
       return settings;
-    },
-  );
+    });
   slot.pending = pending;
   return pending;
 }
 
 function cacheTaskId(song) {
-  const id = songKey(song).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160);
+  const id = songKey(song)
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .slice(0, 160);
   return id || `mygo_${Date.now()}`;
 }
 
@@ -914,10 +954,12 @@ async function boardsFor(source) {
   if (slot.pending && slot.source === source) return slot.pending;
   const next = { source, at: 0, data: null, pending: null };
   boardsCache = next;
-  const pending = api("/api/music/leaderboard/boards", { query: { source } }).then(
-    data => {
+  const pending = api("/api/music/leaderboard/boards", {
+    query: { source },
+  }).then(
+    (data) => {
       const list = Array.isArray(data?.list) ? data.list : [];
-      const mapped = list.map(item => toBoard(item, source));
+      const mapped = list.map((item) => toBoard(item, source));
       if (boardsCache === next) {
         next.data = mapped;
         next.at = Date.now();
@@ -925,7 +967,7 @@ async function boardsFor(source) {
       }
       return mapped;
     },
-    error => {
+    (error) => {
       if (boardsCache === next) next.pending = null;
       throw error;
     },
@@ -940,10 +982,12 @@ async function discoverFor(source) {
   if (slot.pending && slot.source === source) return slot.pending;
   const next = { source, at: 0, data: null, pending: null };
   discoverCache = next;
-  const pending = api("/api/music/songList/list", { query: { source, page: 1 } }).then(
-    data => {
+  const pending = api("/api/music/songList/list", {
+    query: { source, page: 1 },
+  }).then(
+    (data) => {
       const list = Array.isArray(data?.list) ? data.list : [];
-      const mapped = list.map(item => toPlaylist(item, source));
+      const mapped = list.map((item) => toPlaylist(item, source));
       if (discoverCache === next) {
         next.data = mapped;
         next.at = Date.now();
@@ -951,7 +995,7 @@ async function discoverFor(source) {
       }
       return mapped;
     },
-    error => {
+    (error) => {
       if (discoverCache === next) next.pending = null;
       throw error;
     },
@@ -962,7 +1006,10 @@ async function discoverFor(source) {
 
 function albumRaw(item) {
   const source = String(item?.source || sourceId()).trim() || sourceId();
-  return { source, raw: stripSourcePrefix(item?.albumId ?? item?.albumMid ?? item?.id ?? item?.mid ?? "", source) };
+  return {
+    source,
+    raw: stripSourcePrefix(item?.albumId ?? item?.albumMid ?? item?.id ?? item?.mid ?? "", source),
+  };
 }
 
 function artistRaw(item) {
@@ -1072,7 +1119,9 @@ async function albumPage(id) {
     artists = artistName
       ? [
           {
-            id: artistRaw ? artistIdFor(source, stripSourcePrefix(artistRaw, source)) : artistNameId(source, artistName),
+            id: artistRaw
+              ? artistIdFor(source, stripSourcePrefix(artistRaw, source))
+              : artistNameId(source, artistName),
             name: artistName,
           },
         ]
@@ -1080,7 +1129,9 @@ async function albumPage(id) {
     released = dateOnly(first.publishTime);
   }
   if (!raw) throw fail("unavailable", tr("The album wasn't found."));
-  const data = await api("/api/music/albumSongs", { query: { source, id: raw } });
+  const data = await api("/api/music/albumSongs", {
+    query: { source, id: raw },
+  });
   const list = Array.isArray(data?.list) ? data.list : [];
   rememberSongs(list);
   const first = list[0] || null;
@@ -1115,11 +1166,15 @@ async function artistPage(id) {
   if (!raw) throw fail("unavailable", tr("The artist wasn't found."));
   const [detail, firstPage, secondPage, albums] = await Promise.all([
     api("/api/music/artistDetail", { query: { source, id: raw } }),
-    api("/api/music/artistSongs", { query: { source, id: raw, page: 1, limit: LIST_PAGE, order: "hot" } }),
-    api("/api/music/artistSongs", { query: { source, id: raw, page: 2, limit: LIST_PAGE, order: "hot" } }).catch(
-      () => null,
-    ),
-    api("/api/music/artistAlbums", { query: { source, id: raw, page: 1, limit: LIST_PAGE } }).catch(() => null),
+    api("/api/music/artistSongs", {
+      query: { source, id: raw, page: 1, limit: LIST_PAGE, order: "hot" },
+    }),
+    api("/api/music/artistSongs", {
+      query: { source, id: raw, page: 2, limit: LIST_PAGE, order: "hot" },
+    }).catch(() => null),
+    api("/api/music/artistAlbums", {
+      query: { source, id: raw, page: 1, limit: LIST_PAGE },
+    }).catch(() => null),
   ]);
   const songs = [];
   for (const page of [firstPage, secondPage]) {
@@ -1142,7 +1197,11 @@ async function artistPage(id) {
   };
   artist.following = await isFollowedArtist(source, raw);
   const albumItems = albums && Array.isArray(albums.list) ? albums.list : [];
-  return { artist, tracks: unique.map(toTrack), albums: albumItems.map(item => toAlbum(item, source)) };
+  return {
+    artist,
+    tracks: unique.map(toTrack),
+    albums: albumItems.map((item) => toAlbum(item, source)),
+  };
 }
 
 async function onlinePlaylist(source, raw) {
@@ -1150,15 +1209,9 @@ async function onlinePlaylist(source, raw) {
   let total = 0;
   let info = {};
   for (let page = 1; page <= 5; page += 1) {
-    let data;
-    try {
-      data = await api("/api/music/songList/detail", {
-        query: { source, id: raw, page, limit: LIST_PAGE },
-      });
-    } catch (error) {
-      if (!all.length) throw error;
-      break;
-    }
+    const data = await api("/api/music/songList/detail", {
+      query: { source, id: raw, page, limit: LIST_PAGE },
+    });
     const list = Array.isArray(data?.list) ? data.list : [];
     all = all.concat(list);
     total = Number(data?.total) || all.length;
@@ -1173,15 +1226,9 @@ async function boardDetail(source, raw) {
   let all = [];
   let total = 0;
   for (let page = 1; page <= 5; page += 1) {
-    let data;
-    try {
-      data = await api("/api/music/leaderboard/list", {
-        query: { source, bangid: raw, page, limit: LIST_PAGE },
-      });
-    } catch (error) {
-      if (!all.length) throw error;
-      break;
-    }
+    const data = await api("/api/music/leaderboard/list", {
+      query: { source, bangid: raw, page, limit: LIST_PAGE },
+    });
     const list = Array.isArray(data?.list) ? data.list : [];
     all = all.concat(list);
     total = Number(data?.total) || all.length;
@@ -1189,7 +1236,7 @@ async function boardDetail(source, raw) {
   }
   rememberSongs(all);
   const boards = await boardsFor(source).catch(() => []);
-  const board = boards.find(item => {
+  const board = boards.find((item) => {
     const parsed = parseEntityId(item.id, "b");
     return parsed && String(parsed.raw) === String(raw);
   });
@@ -1237,6 +1284,7 @@ export async function signOut() {
       await raw("/api/user/logout", { method: "POST" });
     } catch {}
   }
+  if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
   authState = { ...auth(), userCookie: "", userName: "", signedOut: true };
   playerLoginPending = null;
   userLoginPending = null;
@@ -1248,7 +1296,9 @@ export async function account() {
   try {
     if (!hasAccount() || auth().signedOut) return null;
     if (!auth().userCookie) return accountInfo(await loginUser());
+    const state = auth();
     const result = await raw("/api/user/auth/verify");
+    if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
     if (result.ok && result.data && result.data.valid === true) {
       const name = String(result.data.username || auth().userName || username());
       if (auth().userName !== name) {
@@ -1286,7 +1336,7 @@ export async function search({ query, kind, offset }) {
     const items = Array.isArray(list) ? list : [];
     const saved = await savedAlbumKeys();
     return {
-      albums: items.map(item => {
+      albums: items.map((item) => {
         const album = toAlbum(item, source);
         const parsed = parseEntityId(album.id, "al");
         album.saved = Boolean(parsed && saved.has(`${parsed.source}:${parsed.raw}`));
@@ -1302,7 +1352,7 @@ export async function search({ query, kind, offset }) {
     const items = Array.isArray(list) ? list : [];
     const following = await followedArtistKeys();
     return {
-      artists: items.map(item => {
+      artists: items.map((item) => {
         const artist = toArtist(item, source);
         const parsed = parseEntityId(artist.id, "ar");
         artist.following = Boolean(parsed && following.has(`${parsed.source}:${parsed.raw}`));
@@ -1319,7 +1369,7 @@ export async function search({ query, kind, offset }) {
     const total = Number(data?.total) || 0;
     const saved = await savedPlaylistKeys();
     return {
-      playlists: items.map(item => {
+      playlists: items.map((item) => {
         const playlist = toPlaylist(item, source);
         const parsed = parseEntityId(playlist.id, "p");
         playlist.saved = Boolean(parsed && saved.has(`${parsed.source}:${parsed.raw}`));
@@ -1335,7 +1385,9 @@ export async function search({ query, kind, offset }) {
 export async function suggest({ query }) {
   const source = await configuredSource();
   try {
-    const tips = await api("/api/music/tipSearch", { query: { name: String(query || ""), source } });
+    const tips = await api("/api/music/tipSearch", {
+      query: { name: String(query || ""), source },
+    });
     return Array.isArray(tips) ? tips.map(String).filter(Boolean).slice(0, 10) : [];
   } catch {
     return [];
@@ -1348,23 +1400,49 @@ export async function home() {
   if (hasAccount()) {
     try {
       const tracks = await recent();
-      if (tracks.length) sections.push({ title: tr("Recently Played"), tracks: tracks.slice(0, 10), morePage: "recent" });
+      if (tracks.length)
+        sections.push({
+          title: tr("Recently Played"),
+          tracks: tracks.slice(0, 10),
+          morePage: "recent",
+        });
     } catch {}
     try {
       const lists = await playlists();
-      if (lists.length) sections.push({ title: tr("Your Playlists"), playlists: lists.slice(0, 12), morePage: "playlists" });
+      if (lists.length)
+        sections.push({
+          title: tr("Your Playlists"),
+          playlists: lists.slice(0, 12),
+          morePage: "playlists",
+        });
     } catch {}
   }
   const results = await Promise.all([
-    boardsFor(source).then(value => ({ value, error: null }), error => ({ value: [], error })),
-    discoverFor(source).then(value => ({ value, error: null }), error => ({ value: [], error })),
+    boardsFor(source).then(
+      (value) => ({ value, error: null }),
+      (error) => ({ value: [], error }),
+    ),
+    discoverFor(source).then(
+      (value) => ({ value, error: null }),
+      (error) => ({ value: [], error }),
+    ),
   ]);
   const boards = results[0].value;
   const discover = results[1].value;
-  if (boards.length) sections.push({ title: tr("Charts"), playlists: boards.slice(0, 12), morePage: "charts" });
-  if (discover.length) sections.push({ title: tr("Discover"), playlists: discover.slice(0, 12), morePage: "discover" });
+  if (boards.length)
+    sections.push({
+      title: tr("Charts"),
+      playlists: boards.slice(0, 12),
+      morePage: "charts",
+    });
+  if (discover.length)
+    sections.push({
+      title: tr("Discover"),
+      playlists: discover.slice(0, 12),
+      morePage: "discover",
+    });
   if (!sections.length) {
-    const error = results.find(result => result.error)?.error;
+    const error = results.find((result) => result.error)?.error;
     if (error) throw error;
     throw fail("unavailable", tr("Nothing to show from this server yet."));
   }
@@ -1374,10 +1452,26 @@ export async function home() {
 export async function browse({ page }) {
   const source = await configuredSource();
   const name = String(page || "");
-  if (name === "recent") return { title: tr("Recently Played"), sections: [{ tracks: await recent() }] };
-  if (name === "playlists") return { title: tr("Your Playlists"), sections: [{ playlists: await playlists() }] };
-  if (name === "charts") return { title: tr("Charts"), sections: [{ playlists: await boardsFor(source) }] };
-  if (name === "discover") return { title: tr("Discover"), sections: [{ playlists: await discoverFor(source) }] };
+  if (name === "recent")
+    return {
+      title: tr("Recently Played"),
+      sections: [{ tracks: await recent() }],
+    };
+  if (name === "playlists")
+    return {
+      title: tr("Your Playlists"),
+      sections: [{ playlists: await playlists() }],
+    };
+  if (name === "charts")
+    return {
+      title: tr("Charts"),
+      sections: [{ playlists: await boardsFor(source) }],
+    };
+  if (name === "discover")
+    return {
+      title: tr("Discover"),
+      sections: [{ playlists: await discoverFor(source) }],
+    };
   throw fail("unavailable", tr("No such page."));
 }
 
@@ -1400,7 +1494,7 @@ export async function playlist({ id }) {
   if (text.startsWith("u:")) {
     const raw = parseUserListId(text);
     const data = await userList();
-    const item = (data.userList || []).find(entry => String(entry.id) === raw);
+    const item = (data.userList || []).find((entry) => String(entry.id) === raw);
     if (!item) throw fail("unavailable", tr("The playlist wasn't found."));
     const list = Array.isArray(item.list) ? item.list : [];
     rememberSongs(list);
@@ -1446,10 +1540,25 @@ export async function createPlaylist({ name }) {
   await api("/api/user/playlists", {
     method: "POST",
     user: true,
-    body: { action: "create", playlist: { id, name: clean, icon: "music", list: [], locationUpdateTime: null } },
+    body: {
+      action: "create",
+      playlist: {
+        id,
+        name: clean,
+        icon: "music",
+        list: [],
+        locationUpdateTime: null,
+      },
+    },
   });
   clearListCache();
-  return { id: userListId(id), name: clean, mine: true, trackCount: 0, tracks: [] };
+  return {
+    id: userListId(id),
+    name: clean,
+    mine: true,
+    trackCount: 0,
+    tracks: [],
+  };
 }
 
 export async function renamePlaylist({ id, name }) {
@@ -1457,14 +1566,22 @@ export async function renamePlaylist({ id, name }) {
   if (!raw) throw fail("unavailable", tr("The playlist wasn't found."));
   const clean = String(name || "").trim();
   if (!clean) throw fail("unavailable", tr("The playlist name is empty."));
-  await api("/api/user/playlists", { method: "POST", user: true, body: { action: "rename", id: raw, name: clean } });
+  await api("/api/user/playlists", {
+    method: "POST",
+    user: true,
+    body: { action: "rename", id: raw, name: clean },
+  });
   clearListCache();
 }
 
 export async function deletePlaylist({ id }) {
   const raw = parseUserListId(id);
   if (!raw) throw fail("unavailable", tr("The playlist wasn't found."));
-  await api("/api/user/playlists", { method: "POST", user: true, body: { action: "delete", id: raw } });
+  await api("/api/user/playlists", {
+    method: "POST",
+    user: true,
+    body: { action: "delete", id: raw },
+  });
   clearListCache();
 }
 
@@ -1474,7 +1591,8 @@ export async function addToPlaylist({ id, trackIds }) {
   const songs = [];
   for (const trackId of trackIds || []) {
     const song = lookupSong(trackId);
-    if (song) songs.push(songForList(song));
+    if (!song) throw fail("unavailable", tr("Search for this song again before adding it to a playlist."));
+    songs.push(songForList(song));
   }
   if (!songs.length) throw fail("unavailable", tr("Search for this song again before adding it to a playlist."));
   await api("/api/music/user/list/add", {
@@ -1489,7 +1607,7 @@ export async function removeFromPlaylist({ id, trackIds }) {
   const raw = parseUserListId(id);
   if (!raw) throw fail("unavailable", tr("The playlist wasn't found."));
   const data = await userList(true);
-  const item = (data.userList || []).find(entry => String(entry.id) === raw);
+  const item = (data.userList || []).find((entry) => String(entry.id) === raw);
   if (!item) throw fail("unavailable", tr("The playlist wasn't found."));
   const keys = new Set();
   for (const trackId of trackIds || []) {
@@ -1498,7 +1616,10 @@ export async function removeFromPlaylist({ id, trackIds }) {
       keys.add(`${parsed.source}:${parsed.songmid}`);
     } catch {}
   }
-  const songIds = (item.list || []).filter(song => keys.has(songKey(song))).map(musicInfoId).filter(Boolean);
+  const songIds = (item.list || [])
+    .filter((song) => keys.has(songKey(song)))
+    .map(musicInfoId)
+    .filter(Boolean);
   if (!songIds.length) return;
   await api("/api/music/user/list/remove", {
     method: "POST",
@@ -1511,8 +1632,9 @@ export async function removeFromPlaylist({ id, trackIds }) {
 export async function movePlaylistTrack({ id, from, to }) {
   const raw = parseUserListId(id);
   if (!raw) throw fail("unavailable", tr("The playlist wasn't found."));
-  const data = JSON.parse(JSON.stringify(await userList(true)));
-  const item = (data.userList || []).find(entry => String(entry.id) === raw);
+  const expected = await userList(true);
+  const data = JSON.parse(JSON.stringify(expected));
+  const item = (data.userList || []).find((entry) => String(entry.id) === raw);
   if (!item || !Array.isArray(item.list)) throw fail("unavailable", tr("The playlist wasn't found."));
   const own = !item.source;
   const list = own ? item.list.slice().reverse() : item.list.slice();
@@ -1523,7 +1645,11 @@ export async function movePlaylistTrack({ id, from, to }) {
   const [moved] = list.splice(start, 1);
   list.splice(end, 0, moved);
   item.list = own ? list.reverse() : list;
-  await api("/api/user/list", { method: "POST", user: true, body: data });
+  await api("/api/user/list/compare-and-swap", {
+    method: "POST",
+    user: true,
+    body: { expected, next: data },
+  });
   clearListCache();
 }
 
@@ -1533,17 +1659,24 @@ export async function savePlaylist({ id, on }) {
   if (!parsed) throw fail("unavailable", tr("The playlist wasn't found."));
   const data = await userList(true);
   const existing = (data.userList || []).find(
-    item => String(item.source || "") === parsed.source && String(item.sourceListId || "") === String(parsed.raw),
+    (item) => String(item.source || "") === parsed.source && String(item.sourceListId || "") === String(parsed.raw),
   );
   if (on && existing) return;
   if (!on) {
     if (!existing) return;
-    await api("/api/user/playlists", { method: "POST", user: true, body: { action: "delete", id: existing.id } });
+    await api("/api/user/playlists", {
+      method: "POST",
+      user: true,
+      body: { action: "delete", id: existing.id },
+    });
     clearListCache();
     return;
   }
   const page = await playlist({ id: text });
-  const songs = page.tracks.map(track => lookupSong(track.id)).filter(Boolean).map(songForList);
+  const songs = page.tracks
+    .map((track) => lookupSong(track.id))
+    .filter(Boolean)
+    .map(songForList);
   if (!songs.length) throw fail("unavailable", tr("The playlist has no tracks."));
   const listId = `list_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   await api("/api/user/playlists", {
@@ -1594,7 +1727,7 @@ export async function like({ id, on }) {
   const key = `${parsed.source}:${parsed.songmid}`;
   const data = await userList(true);
   const love = Array.isArray(data.loveList) ? data.loveList : [];
-  const existing = love.find(song => songKey(song) === key);
+  const existing = love.find((song) => songKey(song) === key);
   if (on && !existing) {
     const song = lookupSong(id);
     if (!song) throw fail("unavailable", tr("Search for this song again before liking it."));
@@ -1639,12 +1772,23 @@ export async function played({ id }) {
     await api("/api/user/play-history/events", {
       method: "POST",
       user: true,
-      body: { events: [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, song: item }] },
+      body: {
+        events: [
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            song: item,
+          },
+        ],
+      },
     });
   } catch (error) {
     if (error?.code !== "unavailable") return;
     try {
-      await api("/api/user/play-history", { method: "POST", user: true, body: { items: [item] } });
+      await api("/api/user/play-history", {
+        method: "POST",
+        user: true,
+        body: { items: [item] },
+      });
     } catch {}
   } finally {
     await cacheTask;
@@ -1669,7 +1813,10 @@ export async function savedAlbums({ offset }) {
   const items = await library("albums");
   const start = Math.max(0, Number(offset) || 0);
   const page = items.slice(start, start + LIST_PAGE);
-  return { albums: page.map(toLibraryAlbum), more: start + LIST_PAGE < items.length };
+  return {
+    albums: page.map(toLibraryAlbum),
+    more: start + LIST_PAGE < items.length,
+  };
 }
 
 export async function saveAlbum({ id, on }) {
@@ -1680,24 +1827,32 @@ export async function saveAlbum({ id, on }) {
     const real = parseEntityId(page.album.id, "al");
     if (!real) throw fail("unavailable", tr("The album wasn't found."));
     const items = [...(await library("albums", true))];
-    if (items.some(item => sameAlbum(item, real.source, real.raw, page.album.name))) return;
+    if (items.some((item) => sameAlbum(item, real.source, real.raw, page.album.name))) return;
     items.push({
       id: real.raw,
       name: page.album.name,
       albumName: page.album.name,
-      singer: (page.album.artists || []).map(artist => artist.name).join("、"),
+      singer: (page.album.artists || []).map((artist) => artist.name).join("、"),
       picUrl: page.album.imageUrl,
       publishTime: page.album.released,
       source: real.source,
     });
-    await api("/api/user/library/albums", { method: "POST", user: true, body: items });
+    await api("/api/user/library/compare-and-swap", {
+      method: "POST",
+      user: true,
+      body: { kind: "albums", expected: items.slice(0, -1), next: items },
+    });
     setLibrary("albums", items);
     return;
   }
   const items = [...(await library("albums", true))];
-  const next = items.filter(item => !sameAlbum(item, parsed.source, parsed.raw, parsed.name));
+  const next = items.filter((item) => !sameAlbum(item, parsed.source, parsed.raw, parsed.name));
   if (next.length === items.length) return;
-  await api("/api/user/library/albums", { method: "POST", user: true, body: next });
+  await api("/api/user/library/compare-and-swap", {
+    method: "POST",
+    user: true,
+    body: { kind: "albums", expected: items, next },
+  });
   setLibrary("albums", next);
 }
 
@@ -1709,7 +1864,7 @@ export async function followArtist({ id, on }) {
     const real = parseEntityId(page.artist.id, "ar");
     if (!real) throw fail("unavailable", tr("The artist wasn't found."));
     const items = [...(await library("artists", true))];
-    if (items.some(item => sameArtist(item, real.source, real.raw, page.artist.name))) return;
+    if (items.some((item) => sameArtist(item, real.source, real.raw, page.artist.name))) return;
     items.push({
       id: real.raw,
       name: page.artist.name,
@@ -1717,14 +1872,22 @@ export async function followArtist({ id, on }) {
       picUrl: page.artist.imageUrl,
       source: real.source,
     });
-    await api("/api/user/library/artists", { method: "POST", user: true, body: items });
+    await api("/api/user/library/compare-and-swap", {
+      method: "POST",
+      user: true,
+      body: { kind: "artists", expected: items.slice(0, -1), next: items },
+    });
     setLibrary("artists", items);
     return;
   }
   const items = [...(await library("artists", true))];
-  const next = items.filter(item => !sameArtist(item, parsed.source, parsed.raw, parsed.name));
+  const next = items.filter((item) => !sameArtist(item, parsed.source, parsed.raw, parsed.name));
   if (next.length === items.length) return;
-  await api("/api/user/library/artists", { method: "POST", user: true, body: next });
+  await api("/api/user/library/compare-and-swap", {
+    method: "POST",
+    user: true,
+    body: { kind: "artists", expected: items, next },
+  });
   setLibrary("artists", next);
 }
 
@@ -1747,7 +1910,10 @@ export async function lyrics({ id }) {
 
 export async function comments({ trackId, offset }) {
   const parsed = parseTrackId(trackId);
-  const song = lookupSong(trackId) || { source: parsed.source, songmid: parsed.songmid };
+  const song = lookupSong(trackId) || {
+    source: parsed.source,
+    songmid: parsed.songmid,
+  };
   const start = Math.max(0, Number(offset) || 0);
   const page = Math.floor(start / 20) + 1;
   const data = await api("/api/music/comment", {
@@ -1817,7 +1983,12 @@ function streamUrl(rawUrl, type, song, data) {
   const token = String(data?.downloadToken ?? "").trim();
   if (!token) return url;
   const name = `${String(song?.name || "audio").trim() || "audio"}.${type}`;
-  const query = new URLSearchParams({ url, token, inline: "1", filename: name });
+  const query = new URLSearchParams({
+    url,
+    token,
+    inline: "1",
+    filename: name,
+  });
   return `${base}/api/music/download?${query}`;
 }
 

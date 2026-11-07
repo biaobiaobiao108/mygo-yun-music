@@ -5,14 +5,14 @@ function makeHost(settings = {}, initial = {}) {
   const values = { ...settings };
   return {
     dir: "C:\\Plugins\\yun-music",
-    setting: key => values[key] ?? "",
-    t: text => text,
+    setting: (key) => values[key] ?? "",
+    t: (text) => text,
     storage: {
-      get: key => data[key],
+      get: (key) => data[key],
       set: (key, value) => {
         data[key] = value === undefined ? undefined : JSON.parse(JSON.stringify(value));
       },
-      remove: key => {
+      remove: (key) => {
         delete data[key];
       },
     },
@@ -27,7 +27,7 @@ function response(body, status = 200, cookies = []) {
     status,
     headers: {
       getSetCookie: () => cookies,
-      get: name => (String(name).toLowerCase() === "set-cookie" ? cookies.join(", ") : null),
+      get: (name) => (String(name).toLowerCase() === "set-cookie" ? cookies.join(", ") : null),
     },
     text: async () => (body === undefined ? "" : JSON.stringify(body)),
   };
@@ -44,7 +44,7 @@ function plain(text, status = 200) {
 
 function deferred() {
   let resolve;
-  const promise = new Promise(done => {
+  const promise = new Promise((done) => {
     resolve = done;
   });
   return { promise, resolve };
@@ -53,7 +53,7 @@ function deferred() {
 async function waitFor(predicate) {
   for (let i = 0; i < 50; i += 1) {
     if (predicate()) return;
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
   throw new Error("condition did not become true");
 }
@@ -92,8 +92,14 @@ function route(method, path, handler) {
 function dispatch(url, init = {}) {
   const parsed = new URL(url);
   const method = String(init.method || "GET").toUpperCase();
-  calls.push({ method, path: parsed.pathname, query: parsed.searchParams, headers: init.headers || {}, body: init.body });
-  const found = routes.find(item => item.method === method && item.path === parsed.pathname);
+  calls.push({
+    method,
+    path: parsed.pathname,
+    query: parsed.searchParams,
+    headers: init.headers || {},
+    body: init.body,
+  });
+  const found = routes.find((item) => item.method === method && item.path === parsed.pathname);
   if (!found) return Promise.resolve(response({ message: `unexpected ${method} ${parsed.pathname}` }, 500));
   return Promise.resolve(found.handler(parsed, init));
 }
@@ -112,7 +118,7 @@ function accountRoutes(listData) {
 }
 
 function playbackRoutes(settings = {}) {
-  routes = routes.filter(item => item.path !== "/api/user/playback-settings");
+  routes = routes.filter((item) => item.path !== "/api/user/playback-settings");
   route("GET", "/api/user/playback-settings", () =>
     response({
       defaultSource: "wy",
@@ -133,7 +139,10 @@ const plugin = await import("../index.js");
 beforeEach(async () => {
   routes = [];
   calls = [];
-  globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy" });
+  globalThis.host = makeHost({
+    server: "http://music.local:9527",
+    source: "wy",
+  });
   playbackRoutes();
   await plugin.setSetting({ key: "server" });
   globalThis.fetch = async (url, init = {}) => dispatch(String(url), init);
@@ -142,12 +151,16 @@ beforeEach(async () => {
 describe("mapping", () => {
   test("search maps tracks", async () => {
     configOff();
-    route("GET", "/api/music/search", parsed => {
+    route("GET", "/api/music/search", (parsed) => {
       expect(parsed.searchParams.get("type")).toBe("song");
       expect(parsed.searchParams.get("limit")).toBe("30");
       return response([song]);
     });
-    const result = await plugin.search({ query: "晴天", kind: "tracks", offset: 0 });
+    const result = await plugin.search({
+      query: "晴天",
+      kind: "tracks",
+      offset: 0,
+    });
     expect(result.tracks.length).toBe(1);
     expect(result.tracks[0].id).toBe("t:wy:186016");
     expect(result.tracks[0].name).toBe("晴天");
@@ -159,23 +172,30 @@ describe("mapping", () => {
   });
 
   test("search follows the web player's default source when no override is set", async () => {
-    globalThis.host = makeHost({ server: "http://music.local:9527", source: "" });
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "",
+    });
     await plugin.setSetting({ key: "server" });
     configOff();
     playbackRoutes({ defaultSource: "tx" });
     let requestedSource = "";
-    route("GET", "/api/music/search", parsed => {
+    route("GET", "/api/music/search", (parsed) => {
       requestedSource = parsed.searchParams.get("source");
       return response([{ ...song, source: "tx", songmid: 42, id: 42 }]);
     });
-    const result = await plugin.search({ query: "晴天", kind: "tracks", offset: 0 });
+    const result = await plugin.search({
+      query: "晴天",
+      kind: "tracks",
+      offset: 0,
+    });
     expect(requestedSource).toBe("tx");
     expect(result.tracks[0].id).toBe("t:tx:42");
   });
 
   test("search maps albums, artists and playlists", async () => {
     configOff();
-    route("GET", "/api/music/search", parsed => {
+    route("GET", "/api/music/search", (parsed) => {
       const type = parsed.searchParams.get("type");
       if (type === "album") {
         return response([
@@ -189,27 +209,54 @@ describe("mapping", () => {
           },
         ]);
       }
-      if (type === "singer") return response([{ id: 6452, name: "周杰伦", picUrl: "https://p1.music.126.net/a.jpg" }]);
+      if (type === "singer")
+        return response([
+          {
+            id: 6452,
+            name: "周杰伦",
+            picUrl: "https://p1.music.126.net/a.jpg",
+          },
+        ]);
       return response([]);
     });
-    route("GET", "/api/music/songList/search", parsed => {
+    route("GET", "/api/music/songList/search", (parsed) => {
       expect(parsed.searchParams.get("text")).toBe("x");
       return response({
-        list: [{ id: 123, name: "歌单", img: "https://p1.music.126.net/p.jpg", author: "某人", total: 5 }],
+        list: [
+          {
+            id: 123,
+            name: "歌单",
+            img: "https://p1.music.126.net/p.jpg",
+            author: "某人",
+            total: 5,
+          },
+        ],
         total: 5,
       });
     });
 
-    const albums = await plugin.search({ query: "x", kind: "albums", offset: 0 });
+    const albums = await plugin.search({
+      query: "x",
+      kind: "albums",
+      offset: 0,
+    });
     expect(albums.albums[0].id).toBe("al:wy:18875");
     expect(albums.albums[0].artists[0].id).toBe("ar:wy:6452");
     expect(albums.albums[0].released).toBe("2003-07-01");
 
-    const artists = await plugin.search({ query: "x", kind: "artists", offset: 0 });
+    const artists = await plugin.search({
+      query: "x",
+      kind: "artists",
+      offset: 0,
+    });
     expect(artists.artists[0].id).toBe("ar:wy:6452");
     expect(artists.artists[0].name).toBe("周杰伦");
 
-    const playlists = await plugin.search({ query: "x", kind: "playlists", offset: 0 });
+    const playlists = await plugin.search({
+      query: "x",
+      kind: "playlists",
+      offset: 0,
+    });
     expect(playlists.playlists[0].id).toBe("p:wy:123");
     expect(playlists.playlists[0].owner).toBe("某人");
     expect(playlists.playlists[0].trackCount).toBe(5);
@@ -223,12 +270,30 @@ describe("mapping", () => {
     expect(album.album.released).toBe("2003-07-01");
     expect(album.tracks[0].id).toBe("t:wy:186016");
 
-    route("GET", "/api/music/artistDetail", () => response({ id: 6452, name: "周杰伦", avatar: "https://p1.music.126.net/a.jpg" }));
-    route("GET", "/api/music/artistSongs", parsed =>
-      response({ list: parsed.searchParams.get("page") === "1" ? [song] : [], total: 1 }),
+    route("GET", "/api/music/artistDetail", () =>
+      response({
+        id: 6452,
+        name: "周杰伦",
+        avatar: "https://p1.music.126.net/a.jpg",
+      }),
+    );
+    route("GET", "/api/music/artistSongs", (parsed) =>
+      response({
+        list: parsed.searchParams.get("page") === "1" ? [song] : [],
+        total: 1,
+      }),
     );
     route("GET", "/api/music/artistAlbums", () =>
-      response({ list: [{ id: 18875, name: "叶惠美", img: "https://p1.music.126.net/album.jpg", singer: "周杰伦" }] }),
+      response({
+        list: [
+          {
+            id: 18875,
+            name: "叶惠美",
+            img: "https://p1.music.126.net/album.jpg",
+            singer: "周杰伦",
+          },
+        ],
+      }),
     );
     const artist = await plugin.artist({ id: "ar:wy:6452" });
     expect(artist.artist.name).toBe("周杰伦");
@@ -236,7 +301,16 @@ describe("mapping", () => {
     expect(artist.albums[0].id).toBe("al:wy:18875");
 
     route("GET", "/api/music/songList/detail", () =>
-      response({ list: [song], total: 1, info: { name: "歌单", img: "https://p1.music.126.net/p.jpg", author: "某人", desc: "简介" } }),
+      response({
+        list: [song],
+        total: 1,
+        info: {
+          name: "歌单",
+          img: "https://p1.music.126.net/p.jpg",
+          author: "某人",
+          desc: "简介",
+        },
+      }),
     );
     const playlist = await plugin.playlist({ id: "p:wy:123" });
     expect(playlist.name).toBe("歌单");
@@ -247,7 +321,9 @@ describe("mapping", () => {
   test("server-relative images are made absolute", async () => {
     configOff();
     route("GET", "/api/music/leaderboard/boards", () =>
-      response({ list: [{ bangid: "1", name: "飙升榜", img: "/music/assets/chart.png" }] }),
+      response({
+        list: [{ bangid: "1", name: "飙升榜", img: "/music/assets/chart.png" }],
+      }),
     );
     const page = await plugin.browse({ page: "charts" });
     expect(page.sections[0].playlists[0].imageUrl).toBe("http://music.local:9527/music/assets/chart.png");
@@ -257,7 +333,15 @@ describe("mapping", () => {
     configOff();
     route("GET", "/api/music/leaderboard/list", () => response({ list: [song], total: 1 }));
     route("GET", "/api/music/leaderboard/boards", () =>
-      response({ list: [{ bangid: "1", name: "飙升榜", img: "https://p1.music.126.net/chart.jpg" }] }),
+      response({
+        list: [
+          {
+            bangid: "1",
+            name: "飙升榜",
+            img: "https://p1.music.126.net/chart.jpg",
+          },
+        ],
+      }),
     );
     const page = await plugin.playlist({ id: "b:wy:1" });
     expect(page.name).toBe("飙升榜");
@@ -279,8 +363,15 @@ describe("playback", () => {
     let mode = "relay";
     route("POST", "/api/music/url", () =>
       mode === "relay"
-        ? response({ url: "https://cdn.example.com/a.flac", downloadToken: "tok", type: "flac" })
-        : response({ url: "/api/music/cache/file/_open/a.flac?folder=cache", downloadToken: "tok" }),
+        ? response({
+            url: "https://cdn.example.com/a.flac",
+            downloadToken: "tok",
+            type: "flac",
+          })
+        : response({
+            url: "/api/music/cache/file/_open/a.flac?folder=cache",
+            downloadToken: "tok",
+          }),
     );
     const relayed = await plugin.stream({ id: "t:wy:1", quality: "lossless" });
     expect(relayed.type).toBe("flac");
@@ -299,7 +390,10 @@ describe("playback", () => {
     route("POST", "/api/music/url", (_parsed, init) => {
       const body = JSON.parse(init.body);
       if (body.quality === "flac") return response({ message: "no flac" }, 422);
-      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+      return response({
+        url: "https://cdn.example.com/a.mp3",
+        downloadToken: "tok",
+      });
     });
     const result = await plugin.stream({ id: "t:wy:1", quality: "lossless" });
     expect(result.type).toBe("mp3");
@@ -309,7 +403,11 @@ describe("playback", () => {
   test("stream reports the quality the server actually returned", async () => {
     configOff();
     route("POST", "/api/music/url", () =>
-      response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok", quality: "128k" }),
+      response({
+        url: "https://cdn.example.com/a.mp3",
+        downloadToken: "tok",
+        quality: "128k",
+      }),
     );
     const result = await plugin.stream({ id: "t:wy:1", quality: "high" });
     expect(result.type).toBe("mp3");
@@ -322,7 +420,10 @@ describe("playback", () => {
     let body = null;
     route("POST", "/api/music/url", (_parsed, init) => {
       body = JSON.parse(init.body);
-      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+      return response({
+        url: "https://cdn.example.com/a.mp3",
+        downloadToken: "tok",
+      });
     });
     await plugin.stream({ id: "t:wy:1", quality: "high" });
     expect(body.enableAutoSwitchApiSource).toBe(false);
@@ -339,7 +440,7 @@ describe("playback", () => {
       error = caught;
     }
     expect(error?.code).toBe("unavailable");
-    expect(calls.filter(call => call.method === "POST" && call.path === "/api/music/url")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "POST" && call.path === "/api/music/url")).toHaveLength(1);
   });
 
   test("stream reuses a recent playback address", async () => {
@@ -347,7 +448,10 @@ describe("playback", () => {
     let requests = 0;
     route("POST", "/api/music/url", () => {
       requests += 1;
-      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+      return response({
+        url: "https://cdn.example.com/a.mp3",
+        downloadToken: "tok",
+      });
     });
     await plugin.stream({ id: "t:wy:1", quality: "high" });
     await plugin.stream({ id: "t:wy:1", quality: "high" });
@@ -366,7 +470,11 @@ describe("playback", () => {
 
 describe("authentication", () => {
   test("player password is stored and sent", async () => {
-    globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy", playerPassword: "pw" });
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      playerPassword: "pw",
+    });
     await plugin.setSetting({ key: "server" });
     route("GET", "/api/music/config", () => response({ "player.enableAuth": true }));
     route("POST", "/api/music/auth", () =>
@@ -393,7 +501,11 @@ describe("authentication", () => {
   });
 
   test("a rejected player password is a setup error", async () => {
-    globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy", playerPassword: "wrong" });
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      playerPassword: "wrong",
+    });
     await plugin.setSetting({ key: "server" });
     route("GET", "/api/music/config", () => response({ "player.enableAuth": true }));
     route("POST", "/api/music/auth", () => response({ message: "播放器密码错误" }, 401));
@@ -466,7 +578,10 @@ describe("authentication", () => {
     await plugin.account();
     const signedIn = { ...globalThis.host.__data.auth };
     await plugin.setSetting({ key: "playerPassword" });
-    expect(globalThis.host.__data.auth).toEqual({ ...signedIn, playerCookie: "" });
+    expect(globalThis.host.__data.auth).toEqual({
+      ...signedIn,
+      playerCookie: "",
+    });
     await plugin.setSetting({ key: "username" });
     expect(globalThis.host.__data.auth.userCookie).toBe("");
     expect(globalThis.host.__data.auth.signedOut).toBe(false);
@@ -529,21 +644,33 @@ describe("pages and writes", () => {
     route("GET", "/api/music/leaderboard/boards", () =>
       response({
         list: [
-          { bangid: "1", name: "飙升榜", img: "https://p1.music.126.net/chart.jpg" },
+          {
+            bangid: "1",
+            name: "飙升榜",
+            img: "https://p1.music.126.net/chart.jpg",
+          },
           { bangid: "2", name: "新歌榜" },
         ],
       }),
     );
     route("GET", "/api/music/songList/list", () =>
-      response({ list: [{ id: "9", name: "发现歌单", img: "https://p1.music.126.net/p.jpg", author: "某人", total: 3 }] }),
+      response({
+        list: [
+          {
+            id: "9",
+            name: "发现歌单",
+            img: "https://p1.music.126.net/p.jpg",
+            author: "某人",
+            total: 3,
+          },
+        ],
+      }),
     );
     const page = await plugin.home();
-    expect(page.sections.map(section => section.title)).toEqual(["Charts", "Discover"]);
+    expect(page.sections.map((section) => section.title)).toEqual(["Charts", "Discover"]);
     expect(page.sections[0].playlists[0].id).toBe("b:wy:1");
     expect(page.sections[0].playlists[0].imageUrl).toBe("https://p1.music.126.net/chart.jpg");
-    expect(page.sections[0].playlists[1].imageUrl).toBe(
-      "file:///C:/Plugins/yun-music/icon.png",
-    );
+    expect(page.sections[0].playlists[1].imageUrl).toBe("file:///C:/Plugins/yun-music/icon.png");
     expect(page.sections[1].playlists[0].id).toBe("p:wy:9");
   });
 
@@ -559,8 +686,8 @@ describe("pages and writes", () => {
     route("GET", "/api/music/albumSongs", () => response({ list: [song], name: "叶惠美" }));
     route("GET", "/api/user/library/albums", () => response([]));
     let saved = null;
-    route("POST", "/api/user/library/albums", (_parsed, init) => {
-      saved = JSON.parse(init.body);
+    route("POST", "/api/user/library/compare-and-swap", (_parsed, init) => {
+      saved = JSON.parse(init.body).next;
       return response({ success: true });
     });
     await plugin.saveAlbum({ id: "al:wy:18875", on: true });
@@ -586,12 +713,12 @@ describe("pages and writes", () => {
       ]),
     );
     let saved = null;
-    route("POST", "/api/user/library/albums", (_parsed, init) => {
-      saved = JSON.parse(init.body);
+    route("POST", "/api/user/library/compare-and-swap", (_parsed, init) => {
+      saved = JSON.parse(init.body).next;
       return response({ success: true });
     });
     await plugin.saveAlbum({ id: "al:wy:2", on: false });
-    expect(saved.map(item => item.id)).toEqual(["1"]);
+    expect(saved.map((item) => item.id)).toEqual(["1"]);
   });
 
   test("savePlaylist toggles an online playlist", async () => {
@@ -604,7 +731,11 @@ describe("pages and writes", () => {
     await plugin.setSetting({ key: "server" });
     accountRoutes({ defaultList: [], loveList: [], userList: [] });
     route("GET", "/api/music/songList/detail", () =>
-      response({ list: [song], total: 1, info: { name: "歌单", img: "https://p1.music.126.net/p.jpg" } }),
+      response({
+        list: [song],
+        total: 1,
+        info: { name: "歌单", img: "https://p1.music.126.net/p.jpg" },
+      }),
     );
     let mutation = null;
     route("POST", "/api/user/playlists", (_parsed, init) => {
@@ -632,22 +763,28 @@ describe("pages and writes", () => {
       loveList: [],
       userList: [
         { id: "list_1", name: "我的歌单", list: [song, otherSong] },
-        { id: "list_2", name: "导入", source: "wy", sourceListId: "123", list: [song, otherSong] },
+        {
+          id: "list_2",
+          name: "导入",
+          source: "wy",
+          sourceListId: "123",
+          list: [song, otherSong],
+        },
       ],
     });
     let saved = null;
-    route("POST", "/api/user/list", (_parsed, init) => {
-      saved = JSON.parse(init.body);
+    route("POST", "/api/user/list/compare-and-swap", (_parsed, init) => {
+      saved = JSON.parse(init.body).next;
       return response({ success: true });
     });
 
     const own = await plugin.playlist({ id: "u:list_1" });
-    expect(own.tracks.map(track => track.name)).toEqual(["其他", "晴天"]);
+    expect(own.tracks.map((track) => track.name)).toEqual(["其他", "晴天"]);
     const imported = await plugin.playlist({ id: "u:list_2" });
-    expect(imported.tracks.map(track => track.name)).toEqual(["晴天", "其他"]);
+    expect(imported.tracks.map((track) => track.name)).toEqual(["晴天", "其他"]);
 
     await plugin.movePlaylistTrack({ id: "u:list_1", from: 0, to: 1 });
-    expect(saved.userList.find(list => list.id === "list_1").list.map(item => item.name)).toEqual(["其他", "晴天"]);
+    expect(saved.userList.find((list) => list.id === "list_1").list.map((item) => item.name)).toEqual(["其他", "晴天"]);
   });
 
   test("played writes a playback event and falls back for older servers", async () => {
@@ -670,7 +807,7 @@ describe("pages and writes", () => {
     expect(eventBody.events[0].id).toMatch(/^\d+-[a-z0-9]+$/);
     expect(eventBody.events[0].song.songmid).toBe(186016);
 
-    routes = routes.filter(item => item.path !== "/api/user/play-history/events");
+    routes = routes.filter((item) => item.path !== "/api/user/play-history/events");
     route("POST", "/api/user/play-history/events", () => response({ message: "not found" }, 404));
     let legacyBody = null;
     route("POST", "/api/user/play-history", (_parsed, init) => {
@@ -694,9 +831,16 @@ describe("pages and writes", () => {
     let streamCookie = "";
     route("POST", "/api/music/url", (_parsed, init) => {
       streamCookie = init.headers.Cookie || "";
-      return response({ url: "https://cdn.example.com/a.mp3", downloadToken: "tok" });
+      return response({
+        url: "https://cdn.example.com/a.mp3",
+        downloadToken: "tok",
+      });
     });
-    playbackRoutes({ enableServerCache: true, enableServerLyricCache: false, embedLyricToFile: false });
+    playbackRoutes({
+      enableServerCache: true,
+      enableServerLyricCache: false,
+      embedLyricToFile: false,
+    });
     let queue = null;
     let queueCalls = 0;
     route("POST", "/api/music/cache/queue", (_parsed, init) => {
@@ -752,9 +896,12 @@ describe("pages and writes", () => {
     expect(queued).toBe(false);
 
     await plugin.setSetting({ key: "source" });
-    routes = routes.filter(item => !(item.method === "POST" && item.path === "/api/music/url"));
+    routes = routes.filter((item) => !(item.method === "POST" && item.path === "/api/music/url"));
     route("POST", "/api/music/url", () =>
-      response({ url: "/api/music/cache/file/_open/a.mp3?folder=cache", fromCache: true }),
+      response({
+        url: "/api/music/cache/file/_open/a.mp3?folder=cache",
+        fromCache: true,
+      }),
     );
     playbackRoutes({ enableServerCache: true });
     await plugin.stream({ id: "t:wy:186016", quality: "high" });
@@ -777,19 +924,27 @@ describe("pages and writes", () => {
     const first = deferred();
     route("GET", "/api/user/list", () => first.promise);
     const early = plugin.playlists();
-    await waitFor(() => calls.some(call => call.method === "GET" && call.path === "/api/user/list"));
+    await waitFor(() => calls.some((call) => call.method === "GET" && call.path === "/api/user/list"));
 
     globalThis.host.__settings.server = "http://second.local:9527";
     await plugin.setSetting({ key: "server" });
-    routes = routes.filter(item => !(item.method === "GET" && item.path === "/api/user/list"));
+    routes = routes.filter((item) => !(item.method === "GET" && item.path === "/api/user/list"));
     route("GET", "/api/user/list", () =>
-      response({ userList: [{ id: "new_list", name: "新歌单", list: [] }], loveList: [] }),
+      response({
+        userList: [{ id: "new_list", name: "新歌单", list: [] }],
+        loveList: [],
+      }),
     );
 
     const fresh = await plugin.playlists();
     expect(fresh[0].name).toBe("新歌单");
-    first.resolve(response({ userList: [{ id: "old_list", name: "旧歌单", list: [] }], loveList: [] }));
-    await early;
+    first.resolve(
+      response({
+        userList: [{ id: "old_list", name: "旧歌单", list: [] }],
+        loveList: [],
+      }),
+    );
+    await expect(early).rejects.toThrow("settings changed");
     expect((await plugin.playlists())[0].name).toBe("新歌单");
   });
 
@@ -810,18 +965,80 @@ describe("pages and writes", () => {
 });
 
 describe("server address", () => {
+  test("a stale 401 cannot retry a write under another account", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy", username: "old", password: "secret" });
+    await plugin.setSetting({ key: "server" });
+    configOff();
+    route("POST", "/api/user/login", () => response({ username: "old" }, 200, ["lx_user_session=old; Path=/"]));
+    const delayed = deferred();
+    route("POST", "/api/user/playlists", () => delayed.promise);
+    const pending = plugin.createPlaylist({ name: "test" });
+    await waitFor(() => calls.some(call => call.path === "/api/user/playlists"));
+    globalThis.host.__settings.username = "new";
+    await plugin.setSetting({ key: "username" });
+    delayed.resolve(response({ message: "expired" }, 401));
+    await expect(pending).rejects.toThrow("settings changed");
+    expect(calls.filter(call => call.path === "/api/user/playlists").length).toBe(1);
+  });
+
+  test("recovers after a transient configuration HTTP failure", async () => {
+    let attempts = 0;
+    route("GET", "/api/music/config", () =>
+      ++attempts === 1 ? response({ message: "unavailable" }, 500) : response({ "player.enableAuth": false }),
+    );
+    route("GET", "/api/music/search", () => response([song]));
+    await expect(plugin.search({ query: "x", kind: "tracks", offset: 0 })).rejects.toThrow();
+    expect((await plugin.search({ query: "x", kind: "tracks", offset: 0 })).tracks.length).toBe(1);
+  });
+
+  test("does not save a playlist when a later page fails", async () => {
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "tester",
+      password: "secret",
+    });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    route("GET", "/api/music/songList/detail", (parsed) =>
+      parsed.searchParams.get("page") === "1"
+        ? response({
+            list: Array.from({ length: 100 }, (_, i) => ({
+              ...song,
+              id: i,
+              songmid: i,
+            })),
+            total: 200,
+            info: { name: "test" },
+          })
+        : response({ message: "failed" }, 500),
+    );
+    await expect(plugin.savePlaylist({ id: "p:wy:123", on: true })).rejects.toThrow();
+    expect(calls.some((call) => call.path === "/api/user/playlists")).toBe(false);
+  });
+
   test("accepts a browser address and removes /music", async () => {
-    globalThis.host = makeHost({ server: "music.local:9527/music/#/home", source: "wy" });
+    globalThis.host = makeHost({
+      server: "music.local:9527/music/#/home",
+      source: "wy",
+    });
     await plugin.setSetting({ key: "server" });
     configOff();
     route("GET", "/api/music/search", () => response([song]));
-    const result = await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+    const result = await plugin.search({
+      query: "x",
+      kind: "tracks",
+      offset: 0,
+    });
     expect(result.tracks.length).toBe(1);
-    expect(calls.map(call => call.path)).toEqual(["/api/music/config", "/api/music/search"]);
+    expect(calls.map((call) => call.path)).toEqual(["/api/music/config", "/api/music/search"]);
   });
 
   test("rejects credentials in the address", async () => {
-    globalThis.host = makeHost({ server: "http://user:secret@music.local:9527", source: "wy" });
+    globalThis.host = makeHost({
+      server: "http://user:secret@music.local:9527",
+      source: "wy",
+    });
     await plugin.setSetting({ key: "server" });
     let error;
     try {
