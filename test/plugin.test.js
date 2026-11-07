@@ -965,20 +965,98 @@ describe("pages and writes", () => {
 });
 
 describe("server address", () => {
+  test("loads playback settings only after signing in and targets that account", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", username: "tester", password: "secret" });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    routes = routes.filter((item) => item.path !== "/api/user/playback-settings");
+    route("GET", "/api/user/playback-settings", (parsed, init) => {
+      expect(init.headers.Cookie).toContain("lx_user_session=user123");
+      expect(parsed.searchParams.get("user")).toBe("tester");
+      return response({ defaultSource: "tx", enableAutoSwitchSource: false });
+    });
+    route("GET", "/api/music/search", (parsed) => {
+      expect(parsed.searchParams.get("source")).toBe("tx");
+      return response([song]);
+    });
+    await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+    expect(calls.findIndex((call) => call.path === "/api/user/login")).toBeLessThan(
+      calls.findIndex((call) => call.path === "/api/user/playback-settings"),
+    );
+  });
+
+  test("verifies an existing session before loading settings and recovers from failure", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", username: "tester", password: "secret" });
+    await plugin.setSetting({ key: "server" });
+    route("GET", "/api/user/auth/verify", () => response({ valid: false }));
+    let logins = 0;
+    route("POST", "/api/user/login", () =>
+      response({ username: "tester" }, 200, [`lx_user_session=${++logins === 1 ? "expired" : "fresh"}; Path=/`]),
+    );
+    await plugin.account();
+    routes = routes.filter((item) => item.path !== "/api/user/playback-settings");
+    let count = 0;
+    route("GET", "/api/user/playback-settings", (_parsed, init) => {
+      expect(init.headers.Cookie).toContain("lx_user_session=fresh");
+      return ++count === 1 ? response({ message: "server error" }, 500) : response({ defaultSource: "tx" });
+    });
+    configOff();
+    route("GET", "/api/music/search", (parsed) => {
+      expect(parsed.searchParams.get("source")).toBe("tx");
+      return response([song]);
+    });
+    await expect(plugin.search({ query: "x", kind: "tracks", offset: 0 })).rejects.toThrow("server error");
+    await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+    expect(count).toBe(2);
+  });
+
+  test("uses legacy settings only when the playback settings endpoint is missing", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", username: "tester", password: "secret" });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    routes = routes.filter((item) => item.path !== "/api/user/playback-settings");
+    route("GET", "/api/user/playback-settings", () => response({ message: "not found" }, 404));
+    route("GET", "/api/user/settings", (parsed, init) => {
+      expect(parsed.searchParams.get("user")).toBe("tester");
+      expect(init.headers.Cookie).toContain("lx_user_session=user123");
+      return response({ defaultSource: "tx" });
+    });
+    route("GET", "/api/music/search", (parsed) => {
+      expect(parsed.searchParams.get("source")).toBe("tx");
+      return response([song]);
+    });
+    await plugin.search({ query: "x", kind: "tracks", offset: 0 });
+  });
+
+  test("does not fall back to public settings if the session expires during the settings request", async () => {
+    globalThis.host = makeHost({ server: "http://music.local:9527", username: "tester", password: "secret" });
+    await plugin.setSetting({ key: "server" });
+    accountRoutes({ defaultList: [], loveList: [], userList: [] });
+    routes = routes.filter((item) => item.path !== "/api/user/playback-settings");
+    route("GET", "/api/user/playback-settings", () => response({ message: "session expired" }, 403));
+    await expect(plugin.search({ query: "x", kind: "tracks", offset: 0 })).rejects.toThrow("session expired");
+    expect(calls.some((call) => call.path === "/api/user/settings")).toBe(false);
+  });
+
   test("a stale 401 cannot retry a write under another account", async () => {
-    globalThis.host = makeHost({ server: "http://music.local:9527", source: "wy", username: "old", password: "secret" });
+    globalThis.host = makeHost({
+      server: "http://music.local:9527",
+      source: "wy",
+      username: "old",
+      password: "secret",
+    });
     await plugin.setSetting({ key: "server" });
     configOff();
     route("POST", "/api/user/login", () => response({ username: "old" }, 200, ["lx_user_session=old; Path=/"]));
     const delayed = deferred();
     route("POST", "/api/user/playlists", () => delayed.promise);
     const pending = plugin.createPlaylist({ name: "test" });
-    await waitFor(() => calls.some(call => call.path === "/api/user/playlists"));
+    await waitFor(() => calls.some((call) => call.path === "/api/user/playlists"));
     globalThis.host.__settings.username = "new";
     await plugin.setSetting({ key: "username" });
     delayed.resolve(response({ message: "expired" }, 401));
     await expect(pending).rejects.toThrow("settings changed");
-    expect(calls.filter(call => call.path === "/api/user/playlists").length).toBe(1);
+    expect(calls.filter((call) => call.path === "/api/user/playlists").length).toBe(1);
   });
 
   test("recovers after a transient configuration HTTP failure", async () => {

@@ -18,15 +18,6 @@ const PLAYBACK_CACHE_TTL = 5 * 60_000;
 const PLAYBACK_CACHE_CAP = 100;
 const SONG_URL_TTL = 5 * 60_000;
 const SONG_URL_CAP = 16;
-const PLAYBACK_SETTINGS_DEFAULTS = {
-  defaultSource: "wy",
-  preferredQuality: "flac",
-  enableAutoSwitchSource: true,
-  enableAutoDegradeQuality: true,
-  enableServerCache: true,
-  enableServerLyricCache: true,
-  embedLyricToFile: true,
-};
 
 function setting(key) {
   return String(host.setting(key) || "");
@@ -637,7 +628,9 @@ function decode(result) {
       .slice(0, 500) || `HTTP ${result.status}`;
   if (result.status === 401) throw fail("signIn", message);
   if (result.status === 403 || result.status === 404 || result.status === 422 || result.status === 429) {
-    throw fail("unavailable", message);
+    const error = fail("unavailable", message);
+    error.status = result.status;
+    throw error;
   }
   throw new Error(message);
 }
@@ -860,18 +853,20 @@ async function playbackSettings() {
   const slot = playbackSettingsCache;
   if (slot.data && Date.now() - slot.at < USER_SETTINGS_TTL) return slot.data;
   if (slot.pending) return slot.pending;
-  const pending = api("/api/user/playback-settings", { user: false })
-    .then(
-      (data) => normalizePlaybackSettings(data),
-      async (error) => {
-        if (error?.code !== "unavailable") return { ...PLAYBACK_SETTINGS_DEFAULTS };
-        try {
-          return normalizePlaybackSettings(await api("/api/user/settings", { user: false }));
-        } catch {
-          return { ...PLAYBACK_SETTINGS_DEFAULTS };
-        }
-      },
-    )
+  const state = auth();
+  const pending = (async () => {
+    const useUser = hasAccount() && !state.signedOut;
+    const currentAccount = useUser ? await account() : null;
+    if (useUser && !currentAccount) throw fail("signIn", tr("Sign in to YunLu Music first."));
+    if (state !== authState) throw new Error(tr("The account settings changed. Try again."));
+    const options = { user: useUser, query: useUser ? { user: currentAccount.name } : undefined };
+    try {
+      return normalizePlaybackSettings(await api("/api/user/playback-settings", options));
+    } catch (error) {
+      if (error?.status !== 404) throw error;
+      return normalizePlaybackSettings(await api("/api/user/settings", options));
+    }
+  })()
     .then((settings) => {
       if (playbackSettingsCache === slot) {
         playbackSettingsCache = {
@@ -881,6 +876,10 @@ async function playbackSettings() {
         };
       }
       return settings;
+    })
+    .catch((error) => {
+      if (playbackSettingsCache === slot) slot.pending = null;
+      throw error;
     });
   slot.pending = pending;
   return pending;
@@ -1270,10 +1269,12 @@ export async function setSetting({ key }) {
 
 export async function signIn() {
   if (!hasAccount()) throw fail("setup", tr("Set your YunLu Music account in the plugin's settings."));
+  clearCaches();
   auth().signedOut = false;
   saveAuth();
   await ensurePlayer();
   const name = await loginUser();
+  clearCaches();
   return accountInfo(name);
 }
 
